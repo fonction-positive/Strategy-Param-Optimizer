@@ -73,6 +73,66 @@ def _resample_to_daily(returns: pd.Series) -> pd.Series:
     return daily_returns
 
 
+class BankruptcyAnalyzer(bt.Analyzer):
+    """
+    破产熔断分析器
+
+    每个 bar 检查账户总权益（现金 + 持仓市值）：
+    - 非期货：权益低于初始资金 * threshold 时触发
+    - 期货：有持仓时权益低于持仓所需保证金时触发（爆仓）
+    触发后强制平仓并停止回测。
+    """
+
+    params = (
+        ('initial_cash', 100000.0),
+        ('is_futures', False),
+        ('margin', 0.0),       # 期货保证金比例
+        ('mult', 1),           # 期货合约乘数
+    )
+
+    def start(self):
+        self.bankrupt = False
+        self.bankrupt_date = None
+        self.bankrupt_value = None
+
+    def next(self):
+        if self.bankrupt:
+            return
+
+        if not self.p.is_futures or self.p.margin <= 0:
+            return
+
+        current_value = self.strategy.broker.getvalue()
+
+        # 期货爆仓：计算所有持仓的保证金需求
+        total_margin = 0.0
+        for data in self.strategy.datas:
+            pos = self.strategy.getposition(data)
+            if pos.size != 0:
+                total_margin += abs(pos.size) * data.close[0] * self.p.mult * self.p.margin
+
+        if total_margin > 0 and current_value < total_margin:
+            self.bankrupt = True
+            self.bankrupt_date = self.strategy.data.datetime.date(0)
+            self.bankrupt_value = current_value
+
+            # 强制平掉所有仓位
+            for data in self.strategy.datas:
+                pos = self.strategy.getposition(data)
+                if pos.size != 0:
+                    self.strategy.close(data)
+
+            # 停止回测
+            self.strategy.env.runstop()
+
+    def get_analysis(self):
+        return {
+            'bankrupt': self.bankrupt,
+            'bankrupt_date': str(self.bankrupt_date) if self.bankrupt_date else None,
+            'bankrupt_value': self.bankrupt_value,
+        }
+
+
 class PyfolioMetrics:
     """
     使用 empyrical (pyfolio核心库) 计算投资组合性能指标
@@ -825,7 +885,16 @@ class BacktestEngine:
             cerebro.addanalyzer(bt.analyzers.SharpeRatio, _name='sharpe', 
                               riskfreerate=0.0, annualize=True)
             cerebro.addanalyzer(bt.analyzers.TradeAnalyzer, _name='trades')
-            
+
+            # 添加破产熔断分析器
+            _is_fut = self.broker_config is not None and self.broker_config.is_futures
+            cerebro.addanalyzer(
+                BankruptcyAnalyzer, _name='bankruptcy',
+                is_futures=_is_fut,
+                margin=self.broker_config.margin if _is_fut else 0.0,
+                mult=self.broker_config.mult if _is_fut else 1,
+            )
+
             # 对于日内数据，使用 Daily timeframe 获取日收益率
             # 这样后续计算年化指标时可以直接使用日线年化因子(252)
             is_intraday = _is_intraday_frequency(self.config.data_frequency)
@@ -834,11 +903,32 @@ class BacktestEngine:
                                    timeframe=bt.TimeFrame.Days)
             else:
                 cerebro.addanalyzer(bt.analyzers.TimeReturn, _name='timereturn')
-            
+
             # 运行回测
             results = cerebro.run()
             strat = results[0]
-            
+
+            # 检查是否触发破产熔断
+            bankruptcy_info = strat.analyzers.bankruptcy.get_analysis()
+            if bankruptcy_info['bankrupt']:
+                if self.verbose if hasattr(self, 'verbose') else False:
+                    print(f"  💀 爆仓！权益跌至 {bankruptcy_info['bankrupt_value']:.2f}，"
+                          f"日期: {bankruptcy_info['bankrupt_date']}")
+                # 返回惩罚性结果
+                return BacktestResult(
+                    total_return=-100.0,
+                    annual_return=-100.0,
+                    max_drawdown=100.0,
+                    sharpe_ratio=-10.0,
+                    final_value=bankruptcy_info['bankrupt_value'] or 0,
+                    trades_count=0,
+                    win_rate=0,
+                    params=params,
+                    sortino_ratio=-10.0,
+                    calmar_ratio=-10.0,
+                    omega_ratio=0,
+                )
+
             # 提取 backtrader 的时间收益率，用于 pyfolio 风格的计算
             timereturn = strat.analyzers.timereturn.get_analysis()
             trades = strat.analyzers.trades.get_analysis()
@@ -1053,7 +1143,16 @@ class BacktestEngine:
                     cerebro.adddata(bt_data)
                 
                 cerebro.addstrategy(strategy_class, **params)
-                
+
+                # 添加破产熔断分析器
+                _is_fut = self.broker_config is not None and self.broker_config.is_futures
+                cerebro.addanalyzer(
+                    BankruptcyAnalyzer, _name='bankruptcy',
+                    is_futures=_is_fut,
+                    margin=self.broker_config.margin if _is_fut else 0.0,
+                    mult=self.broker_config.mult if _is_fut else 1,
+                )
+
                 # 添加时间收益率分析器（对于日内数据使用 Daily timeframe）
                 is_intraday = _is_intraday_frequency(self.config.data_frequency)
                 if is_intraday:
@@ -1065,7 +1164,15 @@ class BacktestEngine:
                 # 运行回测
                 results = cerebro.run()
                 strat = results[0]
-                
+
+                # 检查是否触发破产熔断
+                bankruptcy_info = strat.analyzers.bankruptcy.get_analysis()
+                if bankruptcy_info['bankrupt']:
+                    yearly_returns[year] = -100.0
+                    yearly_drawdowns[year] = 100.0
+                    yearly_sharpe[year] = -10.0
+                    continue
+
                 # 提取时间收益率
                 timereturn = strat.analyzers.timereturn.get_analysis()
                 

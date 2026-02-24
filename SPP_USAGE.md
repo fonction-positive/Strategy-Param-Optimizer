@@ -1,204 +1,145 @@
-# SPP 鲁棒性分析使用指南
+# SPP 蒙特卡洛鲁棒性分析使用指南 (v3.0)
 
 ## 概述
 
-SPP (System Parameter Permutation) 鲁棒性分析工具基于 Dave Walton 的论文《Know Your System!》实现，用于验证优化器找到的最优参数是否鲁棒，识别过拟合和数据挖掘偏差。
+SPP (System Parameter Permutation) 鲁棒性分析工具，以贝叶斯优化找到的最优参数为中心，在参数邻域内进行蒙特卡洛采样，评估参数鲁棒性。
 
-**核心思想**: 不只看单一最优参数，而是看参数空间的整体分布（中位数、概率密度），从而评估策略的真实 Edge。
+**核心思想**: 对最优参数施加随机扰动（默认 ±20%），观察策略表现的衰减程度。衰减越小，参数越鲁棒。
 
-## 三个分析维度
+**v3.0 改进**:
+- 单一维度分析（蒙特卡洛邻域采样），替代原有三维度分析，大幅减少计算量
+- 支持 LLM 辅助识别敏感参数，只扰动敏感参数
+- 参数敏感度分析（相关系数）
+- 2×2 可视化报告
 
-### 1. 全局分布 (Global Permutation)
-- 在整个参数空间内均匀随机采样 500 组参数
-- 对每组参数运行完整回测
-- 构建 Sharpe/收益率的抽样分布
-- **中位数** = 策略真实 Edge 的无偏估计
-- **最优参数的分位数排名** = 衡量"运气成分"
+## 敏感参数识别
 
-### 2. 局部稳定性 (Local Stability)
-- 以最优参数为中心，std=10% 范围内采样 200 组邻域参数
-- 使用正态分布采样（复用 `NormalDistributionSampler`）
-- **衰减率** = (best_sharpe - local_median) / |best_sharpe|
-- 衰减率越低 = 参数越鲁棒
+分析器支持三级优先级识别敏感参数：
 
-### 3. 短期最坏情况 (Short-Run Worst-Case)
-- 按年切分数据，每年独立创建 BacktestEngine
-- 每年均匀采样 200 组参数并回测
-- 输出每年的 5th/25th/50th/75th/95th 分位数
-- **5th 分位数** = 论文强调的"最坏情况应急"
+1. **手动指定** (`--sensitive-params`) — 最高优先级，直接指定要扰动的参数
+2. **LLM 分析** (`--use-llm`) — 让 LLM 根据策略类型和参数含义判断哪些参数敏感
+3. **全部参数** (默认) — 扰动所有参数
+
+非敏感参数在采样时固定为最优值，只有敏感参数被扰动，从而减少噪声和计算量。
 
 ## 基本用法
 
-### 必需参数
-
 ```bash
-python run_spp_analysis.py \
-  -r <优化结果JSON路径> \
-  -d <CSV数据文件路径> \
-  -s <策略.py文件路径>
-```
-
-### 完整示例
-
-```bash
-# 标准分析（默认采样数）
+# 标准分析（全部参数扰动）
 python run_spp_analysis.py \
   -r optimization_results/AG/optimization_AG_Aberration_20260202.json \
   -d project_trend/data/AG.csv \
   -s project_trend/src/Aberration.py
 
-# 输出到指定目录
+# 手动指定敏感参数
 python run_spp_analysis.py \
-  -r optimization_results/BTC/optimization_BTC_Aberration.json \
-  -d project_trend/data/BTC.csv \
-  -s project_trend/src/Aberration.py \
-  --output ./my_spp_results
+  -r result.json -d data.csv -s strategy.py \
+  --sensitive-params period,std_dev_upper
+
+# 使用 LLM 识别敏感参数
+python run_spp_analysis.py \
+  -r result.json -d data.csv -s strategy.py \
+  --use-llm --llm-model xuanyuan
+
+# 快速测试（少量采样）
+python run_spp_analysis.py \
+  -r result.json -d data.csv -s strategy.py \
+  --samples 50
 ```
 
 ## 可选参数
 
-### 采样控制
-
-| 参数 | 默认值 | 说明 |
-|------|--------|------|
-| `--global-samples` | 500 | 全局分布采样数 |
-| `--local-samples` | 200 | 局部稳定性采样数 |
-| `--local-noise` | 0.10 | 局部扰动比例（10% = std 为参数范围的 10%） |
-| `--yearly-samples` | 200 | 每年采样数 |
-| `--no-short-run` | - | 跳过逐年分析（加快速度） |
-
-### 快速测试（小样本）
-
-```bash
-# 用于快速验证，大幅减少采样数
-python run_spp_analysis.py \
-  -r result.json -d data.csv -s strategy.py \
-  --global-samples 50 \
-  --local-samples 30 \
-  --yearly-samples 30
-```
-
-### 分析指标
-
-```bash
-# 指定优化目标（默认从 JSON 读取）
-python run_spp_analysis.py \
-  -r result.json -d data.csv -s strategy.py \
-  -o sharpe_ratio  # 或 annual_return, sortino_ratio 等
-```
-
-### 数据频率
-
-```bash
-# 明确指定数据频率（默认自动检测）
-python run_spp_analysis.py \
-  -r result.json -d data.csv -s strategy.py \
-  --data-frequency daily  # 或 1m, 5m, 15m, 30m, hourly
-```
-
-### 期货品种
-
-```bash
-# 期货优化结果分析
-python run_spp_analysis.py \
-  -r optimization_results/AG/result.json \
-  -d project_trend/data/AG.csv \
-  -s project_trend/src/Aberration.py \
-  --asset-type futures \
-  --contract-code AG
-```
-
-### 其他选项
-
-| 参数 | 说明 |
-|------|------|
-| `--output` | 输出目录（默认: ./spp_results） |
-| `-q, --quiet` | 静默模式，减少输出 |
+| 参数 | 短选项 | 默认值 | 说明 |
+|------|--------|--------|------|
+| `--samples` | `-n` | 300 | 蒙特卡洛采样次数 |
+| `--perturbation` | `-p` | 0.20 | 扰动比例（±20%） |
+| `--objective` | `-o` | 从JSON读取 | 分析指标 |
+| `--sensitive-params` | | 无 | 手动指定敏感参数（逗号分隔） |
+| `--use-llm` | | 否 | 启用 LLM 识别敏感参数 |
+| `--llm-model` | | xuanyuan | LLM 模型名 |
+| `--output` | | ./spp_results | 输出目录 |
+| `--data-frequency` | | 自动检测 | 数据频率 |
+| `--asset-type` | | stock | 资产类型 (stock/futures) |
+| `--contract-code` | | 无 | 期货合约代码 |
+| `-q, --quiet` | | 否 | 静默模式 |
 
 ## 输出文件
 
-分析完成后会在输出目录生成两个文件：
+分析完成后在输出目录生成两个文件：
 
-### 1. PNG 可视化报告
+### 1. PNG 可视化报告 (2×2 布局)
 
 **文件名**: `spp_report_{资产名}_{时间戳}.png`
 
-**布局**: 3x2 面板
-
-- **(0,0)** 全局 Sharpe 分布直方图 + KDE + 最优值/中位数标线
-- **(0,1)** 局部稳定性 KDE + 最优值标线 + 衰减率标注
-- **(1,0)** 风险-收益散点图（回撤 vs 年化收益）
-- **(1,1)** 逐年 Sharpe 箱线图 + 5th 分位线
-- **(2,0)** 逐年分位数热力图
-- **(2,1)** 文字总结面板（关键指标 + 过拟合判定）
+- **(0,0)** MC 分布直方图 + KDE + 最优值/中位数标线 + 衰减率
+- **(0,1)** 参数敏感度柱状图（各参数与目标指标的 Pearson 相关系数）
+- **(1,0)** 风险-收益散点图（最大回撤 vs 年化收益）
+- **(1,1)** 文字总结面板（关键指标 + 鲁棒性判定）
 
 ### 2. JSON 结果文件
 
 **文件名**: `spp_result_{资产名}_{时间戳}.json`
 
-**结构**:
-
 ```json
 {
   "spp_info": {
-    "analysis_time": "2026-02-12 14:10:27",
-    "elapsed_seconds": 17.0,
+    "analysis_time": "2026-02-23 10:30:00",
+    "elapsed_seconds": 45.2,
     "source_json": "...",
-    "asset": "BTC",
+    "asset": "AG",
     "strategy": "AberrationStrategy",
-    "config": { ... }
+    "config": {
+      "n_samples": 300,
+      "perturbation_ratio": 0.20,
+      "objective": "sharpe_ratio",
+      "use_llm": false
+    }
   },
-  "best_parameters": { ... },
-  "best_metrics": { ... },
-  "global_distribution": {
-    "sample_count": 500,
-    "median": 0.82,
-    "mean": 0.85,
-    "std": 0.08,
-    "p5": 0.76, "p25": 0.80, "p75": 0.92, "p95": 0.96,
-    "profitability_rate": 95.2,
-    "best_percentile": 98.4
+  "best_parameters": { "period": 35, "std_dev_upper": 2.0 },
+  "best_metrics": { "sharpe_ratio": 1.05, "annual_return": 15.2 },
+  "sensitive_params": {
+    "method": "llm|manual|all",
+    "params": ["period", "std_dev_upper"],
+    "llm_reasoning": "..."
   },
-  "local_stability": {
-    "sample_count": 200,
+  "monte_carlo_stability": {
+    "sample_count": 300,
+    "perturbation_ratio": 0.20,
     "median": 0.95,
-    "mean": 0.95,
+    "mean": 0.93,
+    "std": 0.08,
+    "p5": 0.80, "p25": 0.88, "p75": 0.98, "p95": 1.02,
     "decay_rate": 0.11,
-    "robustness_score": 89.0
-  },
-  "short_run": {
-    "2018": {"p5": -0.50, "p25": -0.17, "median": -0.16, "p75": -0.10, "p95": 0.29},
-    "2019": { ... },
-    ...
+    "robustness_score": 89.0,
+    "param_correlations": { "period": -0.32, "std_dev_upper": 0.15 }
   },
   "verdict": {
-    "overfit_risk": "高 (>95th分位)",
-    "global_edge": "有 (中位数>0)",
     "parameter_robust": "强 (衰减<15%)",
-    "worst_year_5pct": -0.78,
-    "summary": "过拟合风险较高"
+    "stability_score": 0.89,
+    "sensitive_param_count": 2,
+    "summary": "参数鲁棒性强，局部扰动对策略表现影响较小"
   }
 }
 ```
 
 ## 判定标准
 
-### 过拟合风险
-
-- **低**: 最优参数 < 80th 分位
-- **中**: 最优参数 80-95th 分位
-- **高**: 最优参数 > 95th 分位
-
-### 全局 Edge
-
-- **有**: 全局中位数 > 0
-- **无**: 全局中位数 ≤ 0
-
-### 参数鲁棒性
+### 参数鲁棒性（衰减率 = (最优值 - MC中位数) / |最优值|）
 
 - **强**: 衰减率 < 15%
 - **中**: 衰减率 15-30%
 - **弱**: 衰减率 > 30%
+
+### 稳定性得分（stability_score = MC中位数 / 最优值）
+
+- 越接近 1.0 越好，表示邻域参数表现接近最优
+- > 0.85 为良好
+- < 0.70 需要关注
+
+### 参数敏感度（Pearson 相关系数）
+
+- |corr| > 0.3: 该参数对策略表现有显著影响
+- |corr| < 0.1: 该参数对策略表现影响很小
 
 ## 典型工作流
 
@@ -209,7 +150,7 @@ python run_optimizer.py \
   -s project_trend/src/Aberration.py \
   --trials 100
 
-# 2. 运行 SPP 分析（使用优化器输出的 JSON）
+# 2. 运行 SPP 分析
 python run_spp_analysis.py \
   -r optimization_results/AG/optimization_AG_Aberration_20260212.json \
   -d project_trend/data/AG.csv \
@@ -220,61 +161,24 @@ python run_spp_analysis.py \
 # - JSON 结果: spp_results/AG/spp_result_AG_*.json
 ```
 
-## 性能建议
-
-### 标准分析（推荐）
-
-- 全局: 500 组（覆盖参数空间）
-- 局部: 200 组（充分评估邻域）
-- 逐年: 200 组/年（统计显著性）
-- **预计耗时**: 5-15 分钟（取决于策略复杂度和数据量）
-
-### 快速验证
-
-```bash
---global-samples 50 --local-samples 30 --yearly-samples 30
-```
-
-- **预计耗时**: 1-3 分钟
-- 适用于快速检查或调试
-
-### 跳过逐年分析
-
-```bash
---no-short-run
-```
-
-- 只运行维度 1 和 2
-- **预计耗时**: 减少 50-70%
-- 适用于只关心全局和局部鲁棒性的场景
-
-## 注意事项
-
-1. **数据要求**: CSV 必须包含 `datetime/date`, `open`, `high`, `low`, `close`, `volume` 列
-2. **策略要求**: 必须是 Backtrader 兼容策略，使用 `bt.params` 定义参数
-3. **JSON 格式**: 必须是 `run_optimizer.py` 输出的标准格式
-4. **内存占用**: 大样本数 + 长数据 + 复杂策略可能占用较多内存
-5. **并行执行**: 当前版本串行执行回测，未来可能支持并行加速
-
 ## 常见问题
 
-**Q: 为什么我的最优参数过拟合风险高？**
+**Q: 采样次数设多少合适？**
 
-A: 这是正常现象。优化器总是找到历史数据上的最优解，但这不代表未来表现。SPP 分析通过全局分布揭示真实 Edge。如果全局中位数仍为正，说明策略本身有效，只是最优参数可能过度拟合。
+A: 默认 300 次在大多数场景下足够。参数少（<3个）可降到 200，参数多（>5个）建议 400-500。
 
-**Q: 衰减率多少算合理？**
+**Q: 扰动比例怎么选？**
 
-A: < 15% 为强鲁棒，15-30% 为中等，> 30% 为弱。但这取决于策略类型。趋势跟踪策略通常对参数不敏感（低衰减），而均值回归策略可能更敏感。
+A: 默认 ±20% 适合大多数策略。如果参数范围本身很窄，可以适当增大到 0.30。整数参数会自动使用稍小的扰动比例（×0.75）。
 
-**Q: 逐年分析的 5th 分位数为负怎么办？**
+**Q: LLM 识别敏感参数失败怎么办？**
 
-A: 这表明在最坏年份，即使随机选择参数，也有 5% 概率亏损。这是策略固有风险，需要结合全局 Edge 综合判断。如果全局中位数为正，说明长期仍有优势。
+A: 系统会自动 fallback 到扰动全部参数。也可以用 `--sensitive-params` 手动指定。
 
-**Q: 可以用 SPP 分析其他人的优化结果吗？**
+**Q: 衰减率为负数是什么意思？**
 
-A: 可以，只要有优化结果 JSON、原始数据和策略脚本即可。SPP 是独立的分析工具。
+A: 说明邻域参数的中位数表现反而优于最优参数，这通常意味着优化器找到的"最优"可能是局部最优，或者参数空间比较平坦。
 
-## 参考文献
+**Q: 和 v2.0 的三维度分析有什么区别？**
 
-- Dave Walton, "Know Your System! A Practical Guide to Avoiding Overfitting in Trading System Development"
-- 论文核心观点：单一最优参数的表现不可靠，应关注参数空间的整体分布和中位数
+A: v3.0 去掉了全局均匀采样和逐年分析，聚焦于最优参数邻域的蒙特卡洛采样。计算量减少 70%+，同时新增了参数敏感度分析和 LLM 辅助功能。

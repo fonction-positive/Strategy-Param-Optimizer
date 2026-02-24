@@ -213,6 +213,7 @@ class BacktestConfig:
     start_date: str = "2021-01-01"
     slippage: float = 0.0
     data_frequency: str = "daily"  # 数据频率：daily, 1m, 5m, 15m, 30m, hourly 等
+    bankruptcy_threshold: float = 0.1  # 破产熔断阈值：权益低于初始资金的此比例时强制停止（0.1 = 10%）
 
 
 # ==================== 贝叶斯优化配置 ====================
