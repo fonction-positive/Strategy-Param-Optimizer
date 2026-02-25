@@ -257,44 +257,194 @@ class SPPAnalyzer:
             corrs[pname] = round(float(vals.astype(float).corr(df[obj])), 4)
         return corrs
 
-    # ---- 综合判定 ----
+    # ---- 多维度规则化分析 ----
 
-    def _compute_verdict(self, mc_df, best_metrics, sensitive_params):
-        """计算综合判定"""
+    def _grade_robustness(self, decay_rate):
+        """鲁棒性评级：基于衰减率"""
+        d = abs(decay_rate)
+        if d < 0.10:
+            return '优', f'衰减率仅{d:.1%}，参数在邻域内表现极为稳定，微调参数几乎不影响策略效果'
+        elif d < 0.25:
+            return '良', f'衰减率{d:.1%}，参数具备一定鲁棒性，小幅偏离最优值仍可维持合理表现'
+        elif d < 0.50:
+            return '中', f'衰减率{d:.1%}，参数敏感性较高，偏离最优值后策略表现明显下降，需谨慎设定参数'
+        else:
+            return '差', f'衰减率高达{d:.1%}，策略高度依赖精确参数值，实盘中参数漂移风险极大'
+
+    def _grade_overfit_risk(self, mc_df, best_obj, obj_key):
+        """过拟合风险评级：基于最优值在 MC 分布中的分位数"""
+        if len(mc_df) == 0 or obj_key not in mc_df.columns:
+            return '中', '蒙特卡洛样本不足，无法准确评估过拟合风险'
+        vals = mc_df[obj_key].dropna()
+        if len(vals) == 0:
+            return '中', '有效样本为零，无法评估'
+        pct = float((vals < best_obj).sum()) / len(vals) * 100
+        if pct < 75:
+            return '优', f'最优值处于MC分布的{pct:.0f}%分位，大部分随机扰动也能达到相近水平，过拟合可能性低'
+        elif pct < 90:
+            return '良', f'最优值处于MC分布的{pct:.0f}%分位，优于多数扰动组合但未极端偏离，过拟合风险可控'
+        elif pct < 98:
+            return '中', f'最优值处于MC分布的{pct:.0f}%分位，显著优于绝大多数扰动结果，存在一定过拟合嫌疑'
+        else:
+            return '差', f'最优值处于MC分布的{pct:.0f}%分位，几乎是所有扰动中的极端值，过拟合风险很高'
+
+    def _grade_trade_quality(self, trades_count, win_rate):
+        """交易质量评级：基于交易次数和胜率"""
+        wr = win_rate * 100 if win_rate <= 1 else win_rate  # 兼容小数/百分比
+        if trades_count >= 30 and wr >= 40:
+            return '优', f'共{trades_count}笔交易、胜率{wr:.1f}%，样本充足且胜率健康，统计意义可靠'
+        elif trades_count >= 15 and wr >= 30:
+            return '良', f'共{trades_count}笔交易、胜率{wr:.1f}%，交易频次尚可，但建议增加回测时间跨度以提高置信度'
+        elif trades_count >= 5 and wr >= 20:
+            return '中', f'共{trades_count}笔交易、胜率{wr:.1f}%，样本偏少或胜率偏低，结果参考价值有限'
+        else:
+            return '差', f'共{trades_count}笔交易、胜率{wr:.1f}%，交易次数过少或胜率过低，不具备统计显著性'
+
+    def _grade_sensitivity(self, param_corrs, total_params):
+        """敏感参数评级：基于高敏感参数占比 (|corr|>0.3)"""
+        if total_params == 0:
+            return '良', '无可分析参数'
+        high_sens = sum(1 for v in param_corrs.values() if abs(v) > 0.3)
+        ratio = high_sens / total_params
+        high_names = [k for k, v in param_corrs.items() if abs(v) > 0.3]
+        if ratio == 0:
+            return '优', '所有参数与目标指标的相关性均较弱(|r|≤0.3)，策略不依赖单一参数驱动'
+        elif ratio <= 0.25:
+            return '良', f'高敏感参数({", ".join(high_names)})占比{ratio:.0%}，多数参数影响有限，整体可控'
+        elif ratio <= 0.50:
+            return '中', f'高敏感参数({", ".join(high_names)})占比{ratio:.0%}，策略表现受多个参数显著影响'
+        else:
+            return '差', f'高敏感参数({", ".join(high_names)})占比{ratio:.0%}，策略过度依赖参数精确取值'
+
+    def _grade_risk_reward(self, sharpe, max_dd):
+        """风险收益评级：基于 Sharpe 和最大回撤"""
+        dd = abs(max_dd)  # 确保正值
+        if sharpe >= 1.0 and dd <= 20:
+            return '优', f'Sharpe={sharpe:.2f}、最大回撤={dd:.1f}%，风险收益比优秀，策略在风控和盈利间取得良好平衡'
+        elif sharpe >= 0.5 and dd <= 35:
+            return '良', f'Sharpe={sharpe:.2f}、最大回撤={dd:.1f}%，风险收益尚可，但仍有优化空间'
+        elif sharpe >= 0.2 and dd <= 50:
+            return '中', f'Sharpe={sharpe:.2f}、最大回撤={dd:.1f}%，收益勉强覆盖风险，需关注极端行情下的回撤控制'
+        else:
+            return '差', f'Sharpe={sharpe:.2f}、最大回撤={dd:.1f}%，风险收益比不理想，策略盈利能力或风控存在明显短板'
+
+    def _grade_live_trading(self, grades):
+        """实盘可用性评级：加权综合前 5 项"""
+        score_map = {'优': 3, '良': 2, '中': 1, '差': 0}
+        weights = {
+            'robustness': 0.30, 'overfit_risk': 0.25,
+            'trade_quality': 0.20, 'risk_reward': 0.15,
+            'sensitivity': 0.10,
+        }
+        total = sum(score_map.get(grades.get(k, '中'), 1) * w
+                    for k, w in weights.items())
+        if total >= 2.5:
+            grade = '优'
+            text = f'综合加权得分{total:.2f}/3.00，各维度表现均衡且优秀，策略具备实盘部署条件'
+        elif total >= 1.8:
+            grade = '良'
+            text = f'综合加权得分{total:.2f}/3.00，整体可用但部分维度存在短板，建议针对性优化后上线'
+        elif total >= 1.0:
+            grade = '中'
+            text = f'综合加权得分{total:.2f}/3.00，策略存在较多风险点，不建议直接用于实盘'
+        else:
+            grade = '差'
+            text = f'综合加权得分{total:.2f}/3.00，策略在多个维度表现不佳，需大幅改进后方可考虑实盘'
+        return grade, text
+
+    def _compute_analysis(self, mc_df, best_metrics, sensitive_params, param_corrs):
+        """生成一段完整的中文分析文字，涵盖所有 SPP 指标"""
         obj = self.config.objective
         best_obj = best_metrics.get(obj, 0)
-        verdict = {'parameter_robust': '未知', 'stability_score': 0,
-                   'sensitive_param_count': len(sensitive_params), 'summary': ''}
+        n_samples = self.config.n_samples
+        ratio = self.config.perturbation_ratio
 
-        if len(mc_df) > 0:
-            mc_median = mc_df[obj].median()
-            decay = (best_obj - mc_median) / abs(best_obj) if best_obj != 0 else 0
-            stability = mc_median / best_obj if best_obj != 0 else 0
+        # 无有效 MC 数据时的 fallback
+        if len(mc_df) == 0 or obj not in mc_df.columns:
+            return (f'本策略经SPP蒙特卡洛分析（{n_samples}组采样，±{ratio:.0%}扰动），'
+                    f'未获得有效回测样本，无法评估参数鲁棒性。')
 
-            if abs(decay) < 0.15:
-                verdict['parameter_robust'] = '强 (衰减<15%)'
-            elif abs(decay) < 0.30:
-                verdict['parameter_robust'] = '中 (衰减15-30%)'
-            else:
-                verdict['parameter_robust'] = '弱 (衰减>30%)'
+        vals = mc_df[obj].dropna()
+        mc_median = float(vals.median())
+        decay = (best_obj - mc_median) / abs(best_obj) if best_obj != 0 else 0
 
-            verdict['stability_score'] = round(float(stability), 4)
+        # 中位数对应的统计结果：取 objective 最接近中位数的那一行
+        median_idx = (mc_df[obj] - mc_median).abs().idxmin()
+        median_row = mc_df.loc[median_idx]
+        med_ar = median_row.get('annual_return', 0)
+        med_dd = median_row.get('max_drawdown', 0)
 
-            parts = []
-            if abs(decay) >= 0.30:
-                parts.append('参数敏感性高，建议扩大扰动范围验证')
-            if abs(decay) < 0.15:
-                parts.append('参数鲁棒性强，局部扰动对策略表现影响较小')
-            elif abs(decay) < 0.30:
-                parts.append('参数鲁棒性中等，建议关注敏感参数的取值')
-            verdict['summary'] = '；'.join(parts) if parts else ''
+        # 众数区间：对 MC 分布分 bin，取频次最高的区间
+        n_bins = min(15, max(5, len(vals) // 5))
+        counts, bin_edges = np.histogram(vals, bins=n_bins)
+        mode_idx = int(np.argmax(counts))
+        mode_lo, mode_hi = float(bin_edges[mode_idx]), float(bin_edges[mode_idx + 1])
+        mode_pct = counts[mode_idx] / len(vals) * 100
 
-        return verdict
+        # 内部评级（基于中位数对应行的指标）
+        med_trades = int(median_row.get('trades_count', 0))
+        med_sharpe = float(median_row.get('sharpe_ratio', 0))
+
+        g_rob, _ = self._grade_robustness(decay)
+        g_ovf, _ = self._grade_overfit_risk(mc_df, best_obj, obj)
+        g_trd, _ = self._grade_trade_quality(med_trades, 0)  # MC 无 win_rate
+        g_sen, _ = self._grade_sensitivity(param_corrs, len(self.search_space))
+        g_rr, _ = self._grade_risk_reward(med_sharpe, med_dd)
+        grades = {
+            'robustness': g_rob, 'overfit_risk': g_ovf,
+            'trade_quality': g_trd, 'risk_reward': g_rr,
+            'sensitivity': g_sen,
+        }
+        g_live, _ = self._grade_live_trading(grades)
+
+        # ---- 拼接分析文字 ----
+        parts = []
+
+        # 1) 采样配置 + 最优 vs 中位数 + 衰减
+        parts.append(
+            f'本策略经SPP蒙特卡洛分析（{n_samples}组采样，±{ratio:.0%}扰动），'
+            f'最优{obj}为{best_obj:.4f}，MC {obj}中位数为{mc_median:.4f}（衰减{abs(decay):.1%}）')
+
+        # 2) 中位数对应的年化收益、最大回撤、交易次数（附带定性判断）
+        med_desc = f'中位数对应年化收益{med_ar:.2f}%、最大回撤{abs(med_dd):.2f}%、交易{med_trades}笔'
+        med_notes = []
+        if g_trd in ('差', '中'):
+            med_notes.append('交易样本不足')
+        if g_rr in ('差', '中') and abs(med_dd) > 35:
+            med_notes.append('回撤偏高')
+        if med_notes:
+            med_desc += f'（{"，".join(med_notes)}）'
+        parts.append(med_desc)
+
+        # 3) 众数区间
+        parts.append(
+            f'扰动结果集中在{mode_lo:.2f}~{mode_hi:.2f}区间（占比{mode_pct:.0f}%）')
+
+        # 4) 最优值分位数 + 最优参数的统计指标
+        pct = float((vals < best_obj).sum()) / len(vals) * 100
+        best_ar = best_metrics.get('annual_return', 0)
+        best_dd = abs(best_metrics.get('max_drawdown', 0))
+        best_trades = int(best_metrics.get('trades_count', 0))
+        parts.append(
+            f'最优值处于MC分布{pct:.0f}%分位'
+            f'（最优参数年化收益{best_ar:.2f}%、最大回撤{best_dd:.2f}%、交易{best_trades}笔）'
+            + ('，过拟合风险较高' if g_ovf in ('差',) else ''))
+
+        # 5) 综合评价
+        eval_map = {
+            '优': '参数鲁棒性强，各维度表现均衡，策略具备实盘部署条件',
+            '良': '参数鲁棒性尚可，建议针对薄弱环节优化后再部署',
+            '中': '策略存在明显短板，不建议直接用于实盘',
+            '差': '策略在多个维度表现不佳，需大幅改进后方可考虑实盘',
+        }
+        parts.append(f'综合评价：{eval_map[g_live]}')
+
+        return '。'.join(parts) + '。'
 
     # ---- 可视化报告 (2x2) ----
 
     def generate_report(self, mc_df, best_params, best_metrics,
-                        sensitive_params, param_corrs, output_path):
+                        sensitive_params, param_corrs, output_path, analysis=None):
         """生成 2x2 PNG 报告"""
         obj = self.config.objective
         best_obj = best_metrics.get(obj, 0)
@@ -366,7 +516,8 @@ class SPPAnalyzer:
         ax = axes[1, 1]
         ax.axis('off')
         summary_lines = self._build_text_summary(
-            mc_df, best_params, best_metrics, sensitive_params, param_corrs)
+            mc_df, best_params, best_metrics, sensitive_params, param_corrs,
+            analysis or '')
         ax.text(0.05, 0.95, '\n'.join(summary_lines),
                 transform=ax.transAxes, fontsize=10, va='top', ha='left',
                 family='monospace',
@@ -381,7 +532,7 @@ class SPPAnalyzer:
         return output_path
 
     def _build_text_summary(self, mc_df, best_params, best_metrics,
-                            sensitive_params, param_corrs):
+                            sensitive_params, param_corrs, analysis):
         """构建文字总结面板内容"""
         obj = self.config.objective
         best_obj = best_metrics.get(obj, 0)
@@ -400,31 +551,18 @@ class SPPAnalyzer:
             vals = mc_df[obj]
             mc_median = vals.median()
             decay = (best_obj - mc_median) / abs(best_obj) if best_obj != 0 else 0
-            robust_score = max(0, 1 - abs(decay)) * 100
             lines += [
-                f'▸ MC中位数:      {mc_median:.4f}',
-                f'▸ MC均值:        {vals.mean():.4f}',
-                f'▸ MC标准差:      {vals.std():.4f}',
-                f'▸ 衰减率:        {decay:.1%}',
-                f'▸ 鲁棒性评分:    {robust_score:.0f}/100',
+                f'▸ MC中位数: {mc_median:.4f}',
+                f'▸ 衰减率:   {decay:.1%}',
                 '',
             ]
 
-        # 敏感参数
-        lines.append(f'▸ 敏感参数 ({len(sensitive_params)}个):')
-        for p in sensitive_params:
-            corr = param_corrs.get(p, 0)
-            lines.append(f'    {p}  (corr={corr:+.2f})')
-        lines.append('')
-
-        # 综合判定
-        verdict = self._compute_verdict(mc_df, best_metrics, sensitive_params)
-        lines += [
-            '═══ 综合判定 ═══',
-            f'参数鲁棒:   {verdict["parameter_robust"]}',
-            f'稳定性得分: {verdict["stability_score"]:.2f}',
-            f'{verdict["summary"]}',
-        ]
+        # 分析文字（自动折行）
+        lines.append('═══ 综合分析 ═══')
+        if isinstance(analysis, str) and analysis:
+            import textwrap
+            for wrapped in textwrap.wrap(analysis, width=28):
+                lines.append(wrapped)
         return lines
 
     # ---- 完整分析流程 ----
@@ -453,12 +591,17 @@ class SPPAnalyzer:
         # 参数相关性
         param_corrs = self._compute_param_correlations(mc_df, sensitive_params)
 
+        # 多维度分析（先于 generate_report，以便传入面板）
+        analysis = self._compute_analysis(
+            mc_df, best_metrics, sensitive_params, param_corrs)
+
         # 生成 PNG 报告
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         png_path = os.path.join(output_dir,
                                 f'spp_report_{asset_name}_{timestamp}.png')
         self.generate_report(mc_df, best_params, best_metrics,
-                             sensitive_params, param_corrs, png_path)
+                             sensitive_params, param_corrs, png_path,
+                             analysis=analysis)
 
         # 构建 JSON 结果
         obj = self.config.objective
@@ -511,9 +654,8 @@ class SPPAnalyzer:
         else:
             result['monte_carlo_stability'] = {}
 
-        # 综合判定
-        result['verdict'] = self._compute_verdict(
-            mc_df, best_metrics, sensitive_params)
+        # 多维度分析
+        result['analysis'] = analysis
 
         # 保存 JSON
         json_path = os.path.join(output_dir,
@@ -527,10 +669,6 @@ class SPPAnalyzer:
             print(f"[SPP] JSON: {json_path}")
             print(f"[SPP] PNG:  {png_path}")
             print(f"{'='*60}")
-            v = result['verdict']
-            print(f"\n  参数鲁棒:   {v['parameter_robust']}")
-            print(f"  稳定性得分: {v['stability_score']}")
-            if v['summary']:
-                print(f"  总结: {v['summary']}")
+            print(f"\n  [分析] {analysis}")
 
         return result
