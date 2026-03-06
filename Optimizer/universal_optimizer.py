@@ -24,7 +24,7 @@ import backtrader as bt
 from universal_llm_client import UniversalLLMClient, UniversalLLMConfig
 from backtest_engine import BacktestEngine, BacktestResult
 from bayesian_optimizer import BayesianOptimizer
-from config import StrategyParam, BayesianOptConfig
+from config import StrategyParam, BayesianOptConfig, MarketMakerConfig
 from strategy_analyzer import SearchSpaceConfig as ParamSearchSpaceConfig
 from param_space_optimizer import ParamSpaceOptimizer
 from futures_config import BrokerConfig, create_commission_info
@@ -69,7 +69,8 @@ class UniversalOptimizer:
         custom_space: Optional[Dict[str, Dict]] = None,
         data_names: Optional[List[str]] = None,
         data_frequency: Optional[str] = None,
-        broker_config: Optional[BrokerConfig] = None
+        broker_config: Optional[BrokerConfig] = None,
+        market_maker_config: Optional[MarketMakerConfig] = None
     ):
         """
         初始化优化器
@@ -97,7 +98,8 @@ class UniversalOptimizer:
         self.data_names = data_names  # 多数据源名称（可选）
         self.data_frequency = data_frequency  # 数据频率
         self.broker_config = broker_config  # 经纪商配置（期货/股票）
-        
+        self.market_maker_config = market_maker_config  # 做市商优化配置
+
         # 创建输出目录
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -145,7 +147,8 @@ class UniversalOptimizer:
             custom_commission_class=getattr(self, 'custom_commission_class', None),
             strategy_module=getattr(self, 'strategy_module', None),
             use_trade_log_metrics=getattr(self, 'use_trade_log_metrics', False),
-            broker_config=broker_config
+            broker_config=broker_config,
+            market_maker_config=market_maker_config
         )
         
         # 保存检测到的数据频率

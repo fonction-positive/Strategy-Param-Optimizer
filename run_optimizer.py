@@ -45,6 +45,7 @@ if optimizer_path not in sys.path:
 import universal_optimizer
 import universal_llm_client
 import futures_config as fc
+from config import MarketMakerConfig
 UniversalOptimizer = universal_optimizer.UniversalOptimizer
 UniversalLLMConfig = universal_llm_client.UniversalLLMConfig
 
@@ -344,7 +345,7 @@ def main():
     parser.add_argument(
         "--objective", "-o",
         default="sharpe_ratio",
-        choices=["sharpe_ratio", "annual_return", "total_return", "max_drawdown", "calmar_ratio", "sortino_ratio"],
+        choices=["sharpe_ratio", "annual_return", "total_return", "max_drawdown", "calmar_ratio", "sortino_ratio", "market_maker_score"],
         help="优化目标（默认: sharpe_ratio）"
     )
     parser.add_argument(
@@ -390,6 +391,38 @@ def main():
         help="自定义经纪商配置文件路径（JSON格式），用于任意期货品种。优先级高于 --contract-code"
     )
     
+    # 做市商优化参数
+    parser.add_argument(
+        "--mm-alpha",
+        type=float,
+        default=2.0,
+        help="做市商评分：收益权重（默认: 2.0）"
+    )
+    parser.add_argument(
+        "--mm-beta",
+        type=float,
+        default=4.0,
+        help="做市商评分：回撤惩罚权重（默认: 4.0）"
+    )
+    parser.add_argument(
+        "--mm-gamma",
+        type=float,
+        default=6.0,
+        help="做市商评分：亏损额外惩罚权重（默认: 6.0）"
+    )
+    parser.add_argument(
+        "--mm-max-dd",
+        type=float,
+        default=0.15,
+        help="做市商评分：回撤容忍阈值（默认: 0.15）"
+    )
+    parser.add_argument(
+        "--mm-min-trades",
+        type=int,
+        default=10,
+        help="做市商评分：最低交易次数门槛（默认: 10）"
+    )
+
     # v2.0 新增：增强采样器参数
     parser.add_argument(
         "--no-enhanced-sampler",
@@ -493,6 +526,27 @@ def main():
     except (FileNotFoundError, ValueError) as e:
         print(f"❌ 错误: 经纪商配置失败: {e}")
         return 1
+
+    # 构建做市商配置（如果目标是 market_maker_score）
+    market_maker_config = None
+    if args.objective == 'market_maker_score':
+        market_maker_config = MarketMakerConfig(
+            alpha=args.mm_alpha,
+            beta=args.mm_beta,
+            gamma=args.mm_gamma,
+            max_drawdown_threshold=args.mm_max_dd,
+            min_trades=args.mm_min_trades
+        )
+        if not args.quiet:
+            print(f"\n{'='*60}")
+            print(f"做市商优化配置")
+            print(f"{'='*60}")
+            print(f"收益权重 (α): {market_maker_config.alpha}")
+            print(f"回撤惩罚权重 (β): {market_maker_config.beta}")
+            print(f"亏损额外惩罚权重 (γ): {market_maker_config.gamma}")
+            print(f"回撤容忍阈值: {market_maker_config.max_drawdown_threshold}")
+            print(f"最低交易次数: {market_maker_config.min_trades}")
+            print(f"{'='*60}")
 
     # 展开通配符并收集所有数据文件
     data_files = []
@@ -660,7 +714,8 @@ def main():
                     custom_space=custom_space,
                     data_names=data_names,
                     data_frequency=args.data_freq,
-                    broker_config=broker_config
+                    broker_config=broker_config,
+                    market_maker_config=market_maker_config
                 )
                 
                 # 执行优化
@@ -740,7 +795,8 @@ def main():
                         target_params=target_params,
                         custom_space=custom_space,
                         data_frequency=args.data_freq,
-                        broker_config=broker_config
+                        broker_config=broker_config,
+                        market_maker_config=market_maker_config
                     )
                     
                     # 执行优化（v2.0 新增参数）

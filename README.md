@@ -7,7 +7,8 @@
 核心特性：
 
 - 两阶段优化：正态分布采样探索 + 贝叶斯 TPE 利用
-- 多目标支持：Sharpe、Sortino、Calmar、年化收益、总收益、最大回撤
+- 多目标支持：Sharpe、Sortino、Calmar、年化收益、总收益、最大回撤、做市商评分
+- 做市商优化模式：在控制亏损和回撤的前提下最大化交易量
 - 智能参数空间生成与自动边界扩展
 - 专业指标计算（empyrical 框架）
 - 期货合约支持（内置 SC/AG/AU/CU/RB/IF）
@@ -104,6 +105,7 @@ pip install -r requirements.txt
 | `max_drawdown` | 最大回撤（最小化） |
 | `calmar_ratio` | 卡玛比率 |
 | `sortino_ratio` | 索提诺比率 |
+| `market_maker_score` | 做市商评分（量优先、风险门控） |
 
 #### 数据频率
 
@@ -118,6 +120,22 @@ pip install -r requirements.txt
 | `--asset-type` | `stock` | 资产类型，可选 `stock` / `futures` |
 | `--contract-code` | None | 内置期货合约代码：`SC`(原油), `AG`(白银), `AU`(黄金), `CU`(铜), `RB`(螺纹钢), `IF`(沪深300股指)。需配合 `--asset-type futures` |
 | `--broker-config` | None | 自定义经纪商配置文件路径（JSON），优先级高于 `--contract-code` |
+
+#### 做市商优化参数
+
+当 `--objective market_maker_score` 时生效。做市商业务收益来自成交量返佣，优化目标是**在控制亏损和回撤的前提下最大化交易量**。
+
+评分公式：`Score = log(1+V) + α×R - β×D - γ×max(0, -R)`
+
+- V = 交易次数，R = 年化收益率（小数），D = 最大回撤（小数）
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `--mm-alpha` | `2.0` | 收益权重 α：鼓励正收益 |
+| `--mm-beta` | `4.0` | 回撤惩罚权重 β：惩罚回撤 |
+| `--mm-gamma` | `6.0` | 亏损额外惩罚权重 γ：额外惩罚亏损（R<0 时生效） |
+| `--mm-max-dd` | `0.15` | 回撤容忍阈值 |
+| `--mm-min-trades` | `10` | 最低交易次数门槛（低于此值直接判定为不合格） |
 
 #### 增强采样器（v2.0+）
 
@@ -190,6 +208,17 @@ python run_optimizer.py -d data/AG.csv -s strategy/Aberration.py --use-llm --llm
 # 使用 OpenAI
 python run_optimizer.py -d data/AG.csv -s strategy/Aberration.py \
     --use-llm --llm-type openai --api-key sk-xxx
+
+# 做市商优化（基本用法）
+python run_optimizer.py -d data/AG.csv -s strategy/Aberration.py --objective market_maker_score
+
+# 做市商优化（更保守：加大亏损惩罚）
+python run_optimizer.py -d data/AG.csv -s strategy/Aberration.py --objective market_maker_score \
+    --mm-alpha 1.0 --mm-beta 5.0 --mm-gamma 8.0 --mm-max-dd 0.10
+
+# 做市商优化（更激进：允许更大回撤换取更多交易量）
+python run_optimizer.py -d data/AG.csv -s strategy/Aberration.py --objective market_maker_score \
+    --mm-alpha 2.0 --mm-beta 3.0 --mm-gamma 4.0 --mm-max-dd 0.20
 ```
 
 ---

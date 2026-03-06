@@ -310,6 +310,8 @@ class BayesianOptimizer:
                     print(f"║ 夏普比率: {result.sharpe_ratio:<62.4f} ║")
                     print(f"║ 年化收益: {result.annual_return:<61.2f}% ║")
                     print(f"║ 最大回撤: {result.max_drawdown:<61.2f}% ║")
+                    if objective == "market_maker_score":
+                        print(f"║ 交易次数: {result.trades_count:<62} ║")
                     print(f"╠{'═'*78}╣")
                     print(f"║ {'参数集:'.ljust(76)} ║")
                     for k, v in params.items():
@@ -503,6 +505,8 @@ class BayesianOptimizer:
                                 print(f"║ 夏普比率: {result.sharpe_ratio:<62.4f} ║")
                                 print(f"║ 年化收益: {result.annual_return:<61.2f}% ║")
                                 print(f"║ 最大回撤: {result.max_drawdown:<61.2f}% ║")
+                                if objective == "market_maker_score":
+                                    print(f"║ 交易次数: {result.trades_count:<62} ║")
                             print(f"╠{'═'*78}╣")
                             print(f"║ {'参数集:'.ljust(76)} ║")
                             for k, v in params.items():

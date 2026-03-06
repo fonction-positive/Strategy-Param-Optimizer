@@ -33,7 +33,8 @@ except ImportError:
 # 添加项目根目录到路径
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from config import BacktestConfig, DEFAULT_BACKTEST_CONFIG, get_annualization_factor
+import math
+from config import BacktestConfig, DEFAULT_BACKTEST_CONFIG, get_annualization_factor, MarketMakerConfig
 from futures_config import BrokerConfig, create_commission_info
 
 
@@ -577,7 +578,7 @@ class BacktestEngine:
     """
     
     def __init__(
-        self, 
+        self,
         config: BacktestConfig = None,
         data: pd.DataFrame = None,
         strategy_class: Type[bt.Strategy] = None,
@@ -588,11 +589,12 @@ class BacktestEngine:
         custom_commission_class: Type = None,
         strategy_module: Any = None,
         use_trade_log_metrics: bool = False,
-        broker_config: BrokerConfig = None
+        broker_config: BrokerConfig = None,
+        market_maker_config: 'MarketMakerConfig' = None
     ):
         """
         初始化回测引擎
-        
+
         Args:
             config: 回测配置
             data: DataFrame格式的数据（新接口）
@@ -604,8 +606,10 @@ class BacktestEngine:
             custom_commission_class: 自定义手续费类（继承自 bt.CommInfoBase）
             strategy_module: 策略模块（用于查找自定义类）
             use_trade_log_metrics: 是否优先使用策略的 trade_log 计算指标
+            market_maker_config: 做市商优化配置
         """
         self.config = config or DEFAULT_BACKTEST_CONFIG
+        self.market_maker_config = market_maker_config
         self.data_cache = {}
         
         # 新接口支持
@@ -1245,8 +1249,33 @@ class BacktestEngine:
             return -result.max_drawdown
         elif objective == "omega_ratio":
             return result.omega_ratio
+        elif objective == "market_maker_score":
+            return self._calculate_market_maker_score(result)
         else:
             return result.sharpe_ratio
+
+    def _calculate_market_maker_score(self, result: BacktestResult) -> float:
+        """
+        做市商评分：在控制亏损和回撤的前提下最大化交易量
+
+        公式: Score = log(1+V) + α*R - β*D - γ*max(0, -R)
+        """
+        cfg = self.market_maker_config
+        alpha = cfg.alpha if cfg else 2.0
+        beta = cfg.beta if cfg else 4.0
+        gamma = cfg.gamma if cfg else 6.0
+        min_trades = cfg.min_trades if cfg else 10
+
+        V = result.trades_count
+        R = result.annual_return / 100.0  # 百分比转小数
+        D = result.max_drawdown / 100.0   # 百分比转小数
+
+        # 交易次数不达标
+        if V < min_trades:
+            return -1000.0
+
+        score = math.log(1 + V) + alpha * R - beta * D - gamma * max(0.0, -R)
+        return score
     
     def get_result_summary(self, result: BacktestResult) -> Dict[str, Any]:
         """

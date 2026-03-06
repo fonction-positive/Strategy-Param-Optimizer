@@ -146,7 +146,23 @@ OPTIMIZATION_OBJECTIVES = {
         direction="minimize",
         description="最大回撤：策略的最大损失幅度，越低越好"
     ),
+    "market_maker_score": OptimizationObjective(
+        name="market_maker_score",
+        direction="maximize",
+        description="做市商评分：在控制亏损和回撤的前提下最大化交易量，越高越好"
+    ),
 }
+
+
+# ==================== 做市商配置 ====================
+@dataclass
+class MarketMakerConfig:
+    """做市商优化配置"""
+    alpha: float = 2.0       # 收益权重：鼓励正收益
+    beta: float = 4.0        # 回撤惩罚权重
+    gamma: float = 6.0       # 亏损额外惩罚权重
+    max_drawdown_threshold: float = 0.15  # 回撤容忍阈值
+    min_trades: int = 10     # 最低交易次数门槛
 
 
 # ==================== 数据频率配置 ====================
