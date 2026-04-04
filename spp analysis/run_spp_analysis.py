@@ -117,6 +117,50 @@ def load_params_file(path: str) -> dict:
     return params
 
 
+def validate_and_merge_center_params(base_params: dict, override_params: dict,
+                                     search_space: dict):
+    """校验并合并中心参数覆盖"""
+    unknown = sorted(set(override_params) - set(search_space))
+    if unknown:
+        valid = ', '.join(sorted(search_space))
+        raise ValueError(f"未知参数: {', '.join(unknown)}。可用参数: {valid}")
+
+    normalized = {}
+    warnings = []
+    for name, value in override_params.items():
+        sp = search_space[name]
+        if sp.param_type == 'int':
+            if isinstance(value, float) and not float(value).is_integer():
+                raise ValueError(f"参数 {name} 需要整数，当前值为 {value}")
+            normalized_value = int(value)
+        else:
+            normalized_value = float(value)
+
+        if normalized_value < sp.min_value or normalized_value > sp.max_value:
+            warnings.append(
+                f"参数 {name}={normalized_value} 超出搜索空间 [{sp.min_value}, {sp.max_value}]"
+            )
+        normalized[name] = normalized_value
+
+    merged = dict(base_params)
+    merged.update(normalized)
+    return merged, normalized, warnings
+
+
+def build_metrics_from_backtest(result) -> dict:
+    """从回测结果提取 SPP 所需指标"""
+    return {
+        'sharpe_ratio': result.sharpe_ratio,
+        'annual_return': result.annual_return,
+        'max_drawdown': result.max_drawdown,
+        'sortino_ratio': result.sortino_ratio,
+        'calmar_ratio': result.calmar_ratio,
+        'total_return': result.total_return,
+        'trades_count': result.trades_count,
+        'win_rate': result.win_rate,
+    }
+
+
 def build_search_space(strategy_class, best_params: dict) -> dict:
     """从策略类提取参数并构建搜索空间"""
     from param_space_optimizer import ParamSpaceOptimizer
@@ -156,10 +200,24 @@ def main():
     -d project_trend/data/AG.csv \\
     -s project_trend/src/Aberration.py
 
+  # 使用优化结果 JSON + 覆盖中心参数
+  python run_spp_analysis.py \
+    -r optimization_results/AG/optimization_AG_Aberration_20260202.json \
+    -d project_trend/data/AG.csv \
+    -s project_trend/src/Aberration.py \
+    --center-params-file center_params.txt
+
   # 多数据源（策略需要多个CSV）
   python run_spp_analysis.py \\
     --params-file best_params.txt \\
     -d data/BTC.csv data/ETH.csv \\
+    -s strategy.py
+
+  # 使用参数文件 + 覆盖中心参数
+  python run_spp_analysis.py \
+    --params-file best_params.txt \
+    --center-params-file center_params.txt \
+    -d data/BTC.csv data/ETH.csv \
     -s strategy.py
 
 参数文件格式 (key = value):
@@ -183,6 +241,8 @@ def main():
     parser.add_argument("-o", "--objective", default=None,
                         help="分析指标 (默认: 从 JSON 读取)")
 
+    parser.add_argument("--center-params-file", default=None,
+                        help="中心参数覆盖文件（key=value 格式，在基础参数来源上覆盖）")
     parser.add_argument("--use-llm", action="store_true",
                         help="启用 LLM 识别敏感参数")
     parser.add_argument("--llm-model", default="xuanyuan",
@@ -210,6 +270,11 @@ def main():
     # 1. 读取参数来源
     best_metrics = {}  # params-file 模式下稍后自动回测获取
     source_label = ''
+    parameter_source = ''
+    parameter_source_path = ''
+    center_override_file = args.center_params_file
+    center_overrides = {}
+    baseline_recomputed = False
 
     if args.params_file:
         # --- params-file 模式 ---
@@ -225,6 +290,8 @@ def main():
             print("错误: 参数文件为空")
             return 1
         source_label = args.params_file
+        parameter_source = 'params_file'
+        parameter_source_path = args.params_file
         objective = args.objective or 'sharpe_ratio'
     else:
         # --- JSON 模式（原有逻辑） ---
@@ -241,6 +308,8 @@ def main():
             print("错误: JSON 中未找到 best_parameters")
             return 1
         source_label = args.result
+        parameter_source = 'result_json'
+        parameter_source_path = args.result
         objective = args.objective or opt_info.get('optimization_objective', 'sharpe_ratio')
 
     asset_name = Path(args.data[0]).stem
@@ -253,6 +322,8 @@ def main():
         print(f"SPP 蒙特卡洛鲁棒性分析 (v3.0)")
         print(f"{'='*60}")
         print(f"参数来源: {source_label}")
+        if center_override_file:
+            print(f"中心参数覆盖: {center_override_file}")
         if multi_data:
             print(f"数据文件: {len(args.data)} 个")
             for dp in args.data:
@@ -262,7 +333,7 @@ def main():
         print(f"策略文件: {args.strategy}")
         print(f"分析指标: {objective}")
         print(f"采样次数: {args.samples}, 扰动: ±{args.perturbation:.0%}")
-        print(f"最优参数: {best_params}")
+        print(f"基础参数: {best_params}")
         print(f"{'='*60}\n")
 
     # 2. 加载策略和数据
@@ -320,24 +391,33 @@ def main():
         custom_commission_class=custom_commission_class,
         use_trade_log_metrics=use_trade_log_metrics)
 
-    # 5.1 params-file 模式：自动回测获取 best_metrics
-    if not best_metrics:
+    if args.center_params_file:
+        if not Path(args.center_params_file).exists():
+            print(f"错误: 中心参数文件不存在: {args.center_params_file}")
+            return 1
+        try:
+            raw_center_overrides = load_params_file(args.center_params_file)
+            best_params, center_overrides, center_warnings = validate_and_merge_center_params(
+                best_params, raw_center_overrides, search_space)
+        except ValueError as e:
+            print(f"错误: 解析中心参数文件失败: {e}")
+            return 1
         if verbose:
-            print(f"[回测] 使用最优参数运行基准回测...")
+            print(f"[中心参数] 覆盖文件: {args.center_params_file}")
+            print(f"[中心参数] 生效覆盖: {center_overrides}")
+            for warning in center_warnings:
+                print(f"[警告] {warning}")
+
+    # 5.1 params-file 模式：自动回测获取 best_metrics
+    if not best_metrics or center_overrides:
+        if verbose:
+            print(f"[回测] 使用中心参数运行基准回测...")
         baseline = engine.run_backtest(strategy_class, data, best_params, calculate_yearly=False)
         if baseline is None:
             print("错误: 基准回测失败，无法获取 best_metrics")
             return 1
-        best_metrics = {
-            'sharpe_ratio': baseline.sharpe_ratio,
-            'annual_return': baseline.annual_return,
-            'max_drawdown': baseline.max_drawdown,
-            'sortino_ratio': baseline.sortino_ratio,
-            'calmar_ratio': baseline.calmar_ratio,
-            'total_return': baseline.total_return,
-            'trades_count': baseline.trades_count,
-            'win_rate': baseline.win_rate,
-        }
+        best_metrics = build_metrics_from_backtest(baseline)
+        baseline_recomputed = bool(center_overrides) or parameter_source == 'params_file'
         if verbose:
             print(f"[回测] 基准 {objective}: {best_metrics.get(objective, 'N/A')}")
 
@@ -371,6 +451,8 @@ def main():
         objective=objective,
         use_llm=args.use_llm,
         sensitive_params=sensitive_list,
+        random_seed=None,
+        record_samples=True,
     )
 
     analyzer = SPPAnalyzer(
@@ -383,7 +465,16 @@ def main():
     result = analyzer.run_full_analysis(
         best_params=best_params, best_metrics=best_metrics,
         output_dir=output_dir, asset_name=asset_name,
-        strategy_name=strategy_name, source_json=source_label)
+        strategy_name=strategy_name, source_json=source_label,
+        provenance={
+            'parameter_source': parameter_source,
+            'parameter_source_path': parameter_source_path,
+            'center_override_file': center_override_file,
+            'center_params_overridden': sorted(center_overrides),
+            'baseline_recomputed': baseline_recomputed,
+            'record_samples': spp_config.record_samples,
+            'random_seed': spp_config.random_seed,
+        })
 
     return 0
 

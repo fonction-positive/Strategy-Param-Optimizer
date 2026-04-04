@@ -54,6 +54,8 @@ class SPPConfig:
     use_llm: bool = False
     llm_config: Optional[Any] = None
     sensitive_params: Optional[List[str]] = None
+    random_seed: Optional[int] = None
+    record_samples: bool = True
 
 
 class SPPAnalyzer:
@@ -137,7 +139,9 @@ class SPPAnalyzer:
 
     def _generate_mc_samples(self, best_params, sensitive_params):
         """对敏感参数均匀扰动采样，非敏感参数固定为最优值"""
-        rng = np.random.default_rng()
+        if self.config.random_seed is None:
+            self.config.random_seed = int(np.random.SeedSequence().entropy)
+        rng = np.random.default_rng(self.config.random_seed)
         ratio = self.config.perturbation_ratio
         samples = []
         for _ in range(self.config.n_samples):
@@ -191,6 +195,7 @@ class SPPAnalyzer:
             if result is not None:
                 obj_val = self.engine.evaluate_objective(result, self.config.objective)
                 records.append({
+                    'sample_id': i + 1,
                     'params': params,
                     self.config.objective: obj_val,
                     'annual_return': result.annual_return,
@@ -206,12 +211,31 @@ class SPPAnalyzer:
                 print(f"  [{desc}] {i+1}/{total} ({100*(i+1)/total:.0f}%) 剩余 {remaining:.0f}s")
         return pd.DataFrame(records)
 
+    def _serialize_mc_samples(self, mc_df):
+        """将 Monte Carlo 结果转换为可序列化的精简样本列表"""
+        if not self.config.record_samples or len(mc_df) == 0:
+            return []
+        samples = []
+        for row in mc_df.to_dict(orient='records'):
+            sample = {
+                'sample_id': int(row['sample_id']),
+                'params': row['params'],
+                self.config.objective: round(float(row[self.config.objective]), 6),
+                'annual_return': round(float(row['annual_return']), 6),
+                'max_drawdown': round(float(row['max_drawdown']), 6),
+                'sharpe_ratio': round(float(row['sharpe_ratio']), 6),
+                'sortino_ratio': round(float(row['sortino_ratio']), 6),
+                'trades_count': int(row['trades_count']),
+            }
+            samples.append(sample)
+        return samples
+
     # ---- 蒙特卡洛分析 (核心) ----
 
     def run_monte_carlo_analysis(self, best_params, best_metrics):
         """
         以最优参数为中心的蒙特卡洛鲁棒性分析。
-        返回 (DataFrame, sensitive_params, method, reasoning)
+        返回 (DataFrame, sensitive_params, method, reasoning, sampling_metadata, sample_records)
         """
         if self.verbose:
             print(f"\n{'='*60}")
@@ -229,6 +253,13 @@ class SPPAnalyzer:
                 print(f"  固定参数 ({len(fixed)}): {fixed}")
 
         df = self._evaluate_batch(samples, desc="蒙特卡洛")
+        sampling_metadata = {
+            'n_samples': self.config.n_samples,
+            'perturbation_ratio': self.config.perturbation_ratio,
+            'random_seed': self.config.random_seed,
+            'sensitive_params_method': method,
+        }
+        sample_records = self._serialize_mc_samples(df)
 
         if self.verbose and len(df) > 0:
             obj = self.config.objective
@@ -237,7 +268,7 @@ class SPPAnalyzer:
             print(f"  {obj} 均值:   {df[obj].mean():.4f}")
             print(f"  {obj} 标准差: {df[obj].std():.4f}")
 
-        return df, sensitive_params, method, reasoning
+        return df, sensitive_params, method, reasoning, sampling_metadata, sample_records
 
     # ---- 参数相关性 ----
 
@@ -566,7 +597,7 @@ class SPPAnalyzer:
 
     def run_full_analysis(self, best_params, best_metrics, output_dir,
                           asset_name='ASSET', strategy_name='Strategy',
-                          source_json=''):
+                          source_json='', provenance=None):
         """运行完整 SPP 分析并输出 JSON + PNG"""
         start_time = time.time()
         os.makedirs(output_dir, exist_ok=True)
@@ -580,7 +611,7 @@ class SPPAnalyzer:
             print(f"{'#'*60}")
 
         # 蒙特卡洛分析
-        mc_df, sensitive_params, sp_method, sp_reasoning = \
+        mc_df, sensitive_params, sp_method, sp_reasoning, sampling_metadata, sample_records = \
             self.run_monte_carlo_analysis(best_params, best_metrics)
 
         elapsed = time.time() - start_time
@@ -616,11 +647,22 @@ class SPPAnalyzer:
                     'perturbation_ratio': self.config.perturbation_ratio,
                     'objective': self.config.objective,
                     'use_llm': self.config.use_llm,
+                    'random_seed': self.config.random_seed,
+                    'record_samples': self.config.record_samples,
                 },
             },
             'best_parameters': best_params,
             'best_metrics': best_metrics,
+            'monte_carlo': {
+                'sampling_metadata': sampling_metadata,
+                'samples_saved': len(sample_records),
+                'samples': sample_records,
+            },
         }
+        if provenance:
+            result['spp_info'].update(provenance)
+        result['spp_info']['random_seed'] = self.config.random_seed
+        result['spp_info']['record_samples'] = self.config.record_samples
 
         # 敏感参数信息
         result['sensitive_params'] = {

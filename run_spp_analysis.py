@@ -69,6 +69,72 @@ def load_data(data_path: str) -> pd.DataFrame:
     return df
 
 
+def load_params_file(path: str) -> dict:
+    """解析 key=value 格式的参数文件，返回 {name: value} 字典"""
+    params = {}
+    with open(path, 'r', encoding='utf-8') as f:
+        for lineno, line in enumerate(f, 1):
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
+            if '=' not in line:
+                raise ValueError(f"第{lineno}行格式错误（需要 key = value）: {line}")
+            key, val = line.split('=', 1)
+            key, val = key.strip(), val.strip()
+            try:
+                params[key] = int(val)
+            except ValueError:
+                try:
+                    params[key] = float(val)
+                except ValueError:
+                    raise ValueError(f"第{lineno}行值无法解析为数字: {key} = {val}")
+    return params
+
+
+def validate_and_merge_center_params(base_params: dict, override_params: dict,
+                                     search_space: dict):
+    """校验并合并中心参数覆盖"""
+    unknown = sorted(set(override_params) - set(search_space))
+    if unknown:
+        valid = ', '.join(sorted(search_space))
+        raise ValueError(f"未知参数: {', '.join(unknown)}。可用参数: {valid}")
+
+    normalized = {}
+    warnings = []
+    for name, value in override_params.items():
+        sp = search_space[name]
+        if sp.param_type == 'int':
+            if isinstance(value, float) and not float(value).is_integer():
+                raise ValueError(f"参数 {name} 需要整数，当前值为 {value}")
+            normalized_value = int(value)
+        else:
+            normalized_value = float(value)
+
+        if normalized_value < sp.min_value or normalized_value > sp.max_value:
+            warnings.append(
+                f"参数 {name}={normalized_value} 超出搜索空间 [{sp.min_value}, {sp.max_value}]"
+            )
+        normalized[name] = normalized_value
+
+    merged = dict(base_params)
+    merged.update(normalized)
+    return merged, normalized, warnings
+
+
+def build_metrics_from_backtest(result) -> dict:
+    """从回测结果提取 SPP 所需指标"""
+    return {
+        'sharpe_ratio': result.sharpe_ratio,
+        'annual_return': result.annual_return,
+        'max_drawdown': result.max_drawdown,
+        'sortino_ratio': result.sortino_ratio,
+        'calmar_ratio': result.calmar_ratio,
+        'total_return': result.total_return,
+        'trades_count': result.trades_count,
+        'win_rate': result.win_rate,
+    }
+
+
 def build_search_space(strategy_class, best_params: dict) -> dict:
     """从策略类提取参数并构建搜索空间"""
     from param_space_optimizer import ParamSpaceOptimizer
@@ -101,6 +167,11 @@ def main():
     -d project_trend/data/AG.csv \\
     -s project_trend/src/Aberration.py
 
+  # 手动覆盖 SPP 中心参数
+  python run_spp_analysis.py \
+    -r result.json -d data.csv -s strategy.py \
+    --center-params-file center_params.txt
+
   # 手动指定敏感参数
   python run_spp_analysis.py \\
     -r result.json -d data.csv -s strategy.py \\
@@ -110,6 +181,10 @@ def main():
   python run_spp_analysis.py \\
     -r result.json -d data.csv -s strategy.py \\
     --use-llm --llm-model xuanyuan
+
+中心参数文件格式 (key = value):
+  period = 35
+  std_dev_upper = 2.1
         """
     )
 
@@ -124,6 +199,8 @@ def main():
     parser.add_argument("-o", "--objective", default=None,
                         help="分析指标 (默认: 从 JSON 读取)")
 
+    parser.add_argument("--center-params-file", default=None,
+                        help="中心参数覆盖文件（key=value 格式，在 JSON best_parameters 基础上覆盖）")
     parser.add_argument("--use-llm", action="store_true",
                         help="启用 LLM 识别敏感参数")
     parser.add_argument("--llm-model", default="xuanyuan",
@@ -163,17 +240,24 @@ def main():
     asset_name = opt_info.get('asset_name', Path(args.data).stem)
     strategy_name = opt_info.get('strategy_name', Path(args.strategy).stem)
     verbose = not args.quiet
+    parameter_source = 'result_json'
+    parameter_source_path = args.result
+    center_override_file = args.center_params_file
+    center_overrides = {}
+    baseline_recomputed = False
 
     if verbose:
         print(f"\n{'='*60}")
         print(f"SPP 蒙特卡洛鲁棒性分析 (v3.0)")
         print(f"{'='*60}")
-        print(f"优化结果: {args.result}")
+        print(f"参数来源: {parameter_source_path}")
+        if center_override_file:
+            print(f"中心参数覆盖: {center_override_file}")
         print(f"数据文件: {args.data}")
         print(f"策略文件: {args.strategy}")
         print(f"分析指标: {objective}")
         print(f"采样次数: {args.samples}, 扰动: ±{args.perturbation:.0%}")
-        print(f"最优参数: {best_params}")
+        print(f"基础参数: {best_params}")
         print(f"{'='*60}\n")
 
     # 2. 加载策略和数据
@@ -219,6 +303,33 @@ def main():
         data_frequency=effective_freq,
         strategy_module=strategy_module, broker_config=broker_config)
 
+    if args.center_params_file:
+        if not Path(args.center_params_file).exists():
+            print(f"错误: 中心参数文件不存在: {args.center_params_file}")
+            return 1
+        try:
+            raw_center_overrides = load_params_file(args.center_params_file)
+            best_params, center_overrides, center_warnings = validate_and_merge_center_params(
+                best_params, raw_center_overrides, search_space)
+        except ValueError as e:
+            print(f"错误: 解析中心参数文件失败: {e}")
+            return 1
+        if verbose:
+            print(f"[中心参数] 覆盖文件: {args.center_params_file}")
+            print(f"[中心参数] 生效覆盖: {center_overrides}")
+            for warning in center_warnings:
+                print(f"[警告] {warning}")
+
+        baseline = engine.run_backtest(
+            strategy_class, data, best_params, calculate_yearly=False)
+        if baseline is None:
+            print("错误: 覆盖中心参数后的基准回测失败")
+            return 1
+        best_metrics = build_metrics_from_backtest(baseline)
+        baseline_recomputed = True
+        if verbose:
+            print(f"[回测] 已基于覆盖后的中心参数重算基准 {objective}: {best_metrics.get(objective, 'N/A')}")
+
     # 6. 解析敏感参数
     sensitive_list = None
     if args.sensitive_params:
@@ -261,7 +372,14 @@ def main():
     result = analyzer.run_full_analysis(
         best_params=best_params, best_metrics=best_metrics,
         output_dir=output_dir, asset_name=asset_name,
-        strategy_name=strategy_name, source_json=args.result)
+        strategy_name=strategy_name, source_json=args.result,
+        provenance={
+            'parameter_source': parameter_source,
+            'parameter_source_path': parameter_source_path,
+            'center_override_file': center_override_file,
+            'center_params_overridden': sorted(center_overrides),
+            'baseline_recomputed': baseline_recomputed,
+        })
 
     return 0
 

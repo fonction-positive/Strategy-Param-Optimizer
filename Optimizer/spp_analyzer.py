@@ -569,7 +569,7 @@ class SPPAnalyzer:
 
     def run_full_analysis(self, best_params, best_metrics, output_dir,
                           asset_name='ASSET', strategy_name='Strategy',
-                          source_json=''):
+                          source_json='', provenance=None):
         """运行完整 SPP 分析并输出 JSON + PNG"""
         start_time = time.time()
         os.makedirs(output_dir, exist_ok=True)
@@ -624,6 +624,8 @@ class SPPAnalyzer:
             'best_parameters': best_params,
             'best_metrics': best_metrics,
         }
+        if provenance:
+            result['spp_info'].update(provenance)
 
         # 敏感参数信息
         result['sensitive_params'] = {
