@@ -24,7 +24,7 @@ import backtrader as bt
 from universal_llm_client import UniversalLLMClient, UniversalLLMConfig
 from backtest_engine import BacktestEngine, BacktestResult
 from bayesian_optimizer import BayesianOptimizer
-from config import StrategyParam, BayesianOptConfig, MarketMakerConfig
+from config import StrategyParam, BayesianOptConfig, MarketMakerConfig, ParallelConfig, BatchParallelConfig, DEFAULT_PARALLEL_CONFIG, DEFAULT_BATCH_PARALLEL_CONFIG
 from strategy_analyzer import SearchSpaceConfig as ParamSearchSpaceConfig
 from param_space_optimizer import ParamSpaceOptimizer
 from futures_config import BrokerConfig, create_commission_info
@@ -70,11 +70,13 @@ class UniversalOptimizer:
         data_names: Optional[List[str]] = None,
         data_frequency: Optional[str] = None,
         broker_config: Optional[BrokerConfig] = None,
-        market_maker_config: Optional[MarketMakerConfig] = None
+        market_maker_config: Optional[MarketMakerConfig] = None,
+        parallel_config: Optional[ParallelConfig] = None,
+        batch_parallel_config: Optional[BatchParallelConfig] = None
     ):
         """
         初始化优化器
-        
+
         Args:
             data_path: 标的数据CSV文件路径
             strategy_path: 策略脚本文件路径（.py文件）
@@ -87,6 +89,8 @@ class UniversalOptimizer:
             custom_space: 自定义参数空间配置，格式: {param_name: {min, max, step, distribution}}
             data_frequency: 数据频率（'daily', '1m', '5m', '15m', '30m', 'hourly' 等）
                            为None或'auto'时自动检测
+            parallel_config: 并行优化配置
+            batch_parallel_config: 批量并行优化配置
         """
         self.data_path = data_path
         self.strategy_path = strategy_path
@@ -99,6 +103,8 @@ class UniversalOptimizer:
         self.data_frequency = data_frequency  # 数据频率
         self.broker_config = broker_config  # 经纪商配置（期货/股票）
         self.market_maker_config = market_maker_config  # 做市商优化配置
+        self.parallel_config = parallel_config or DEFAULT_PARALLEL_CONFIG  # 并行优化配置
+        self.batch_parallel_config = batch_parallel_config or DEFAULT_BATCH_PARALLEL_CONFIG  # 批量并行优化配置
 
         # 创建输出目录
         self.output_dir = Path(output_dir)
@@ -150,7 +156,14 @@ class UniversalOptimizer:
             broker_config=broker_config,
             market_maker_config=market_maker_config
         )
-        
+
+        # 设置路径信息（用于进程池并行）
+        self.backtest_engine.strategy_path = str(Path(strategy_path).absolute())
+        if isinstance(data_path, (list, tuple)):
+            self.backtest_engine.data_path = [str(Path(p).absolute()) for p in data_path]
+        else:
+            self.backtest_engine.data_path = str(Path(data_path).absolute())
+
         # 保存检测到的数据频率
         self.detected_frequency = self.backtest_engine.config.data_frequency
         
@@ -551,7 +564,9 @@ class UniversalOptimizer:
                 config=bayesian_config,
                 backtest_engine=self.backtest_engine,
                 use_llm=False,
-                verbose=self.verbose
+                verbose=self.verbose,
+                parallel_config=self.parallel_config,
+                batch_parallel_config=self.batch_parallel_config
             )
             
             # 确定初始采样点（首轮用默认参数，后续轮用上一轮最优）

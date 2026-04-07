@@ -81,7 +81,7 @@ class NormalDistributionSampler:
     ) -> Any:
         """
         对单个参数进行正态分布采样
-        
+
         Args:
             param_name: 参数名称
             min_value: 最小值
@@ -89,10 +89,31 @@ class NormalDistributionSampler:
             param_type: 参数类型 ('int' or 'float')
             default_value: 默认值（用作正态分布的中心）
             step: 步长
-            
+
         Returns:
             采样值
         """
+        # 特殊处理：quantile 类型参数必须严格在 (0, 1) 范围内
+        # 包括: quantile, q_pressure, q_support 等用于 QuantileRegressor 的参数
+        param_name_lower = param_name.lower()
+        is_quantile_param = ('quantile' in param_name_lower or
+                             param_name_lower.startswith('q_') or
+                             param_name_lower in ('q_pressure', 'q_support'))
+        if is_quantile_param:
+            # 更严格的范围，避免极端值
+            min_value = max(0.05, min(min_value, 0.8))
+            max_value = min(0.95, max(max_value, 0.2))
+            if default_value is not None:
+                default_value = max(0.05, min(0.95, default_value))
+
+        # 特殊处理：lookback 和 window 参数
+        if 'lookback' in param_name_lower:
+            min_value = max(20, min_value)
+            max_value = min(200, max_value)
+        elif 'window' in param_name_lower:
+            min_value = max(2, min_value)
+            max_value = min(20, max_value)
+
         # 计算正态分布参数
         param_range = max_value - min_value
         

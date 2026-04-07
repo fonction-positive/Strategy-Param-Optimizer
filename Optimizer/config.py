@@ -244,7 +244,34 @@ class BayesianOptConfig:
     n_jobs: int = 1  # 并行任务数
 
 
+# ==================== 并行优化配置 ====================
+@dataclass
+class ParallelConfig:
+    """并行优化配置"""
+    enable_parallel: bool = True           # 是否启用并行
+    n_workers: int = -1                    # 工作进程数, -1 表示自动检测 (CPU核心数)
+    batch_size: int = 8                    # 批量大小 (利用阶段)
+    verbose_joblib: int = 0                # joblib 日志级别 (0=静默, 10=详细)
+
+
+# ==================== 批量并行优化配置 ====================
+@dataclass
+class BatchParallelConfig:
+    """批量并行贝叶斯优化配置"""
+    enable_batch_parallel: bool = True     # 是否启用批量并行（利用阶段）
+    batch_size: int = 8                    # 批量大小
+    adaptive_batch: bool = True            # 是否使用自适应批量大小
+    max_batch_size: int = 12               # 最大批量大小
+    min_batch_size: int = 2                # 最小批量大小
+    diversity_ratio: float = 0.3           # 多样性采样比例
+    hybrid_mode: bool = True               # 是否使用混合模式
+    parallel_ratio: float = 0.7            # 批量并行阶段占比（剩余用串行精细搜索）
+    perturbation_strength: float = 0.1     # 随机扰动强度
+
+
 # ==================== 默认配置实例 ====================
 DEFAULT_LLM_CONFIG = LLMConfig()
 DEFAULT_BACKTEST_CONFIG = BacktestConfig()
 DEFAULT_BAYESIAN_CONFIG = BayesianOptConfig()
+DEFAULT_PARALLEL_CONFIG = ParallelConfig()
+DEFAULT_BATCH_PARALLEL_CONFIG = BatchParallelConfig()

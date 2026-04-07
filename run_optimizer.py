@@ -45,7 +45,7 @@ if optimizer_path not in sys.path:
 import universal_optimizer
 import universal_llm_client
 import futures_config as fc
-from config import MarketMakerConfig
+from config import MarketMakerConfig, ParallelConfig, BatchParallelConfig
 UniversalOptimizer = universal_optimizer.UniversalOptimizer
 UniversalLLMConfig = universal_llm_client.UniversalLLMConfig
 
@@ -445,6 +445,58 @@ def main():
         default=2,
         help="边界二次搜索最大轮数（默认: 2）"
     )
+
+    # 并行优化参数
+    parser.add_argument(
+        "--parallel",
+        action="store_true",
+        help="启用并行优化（探索阶段多进程并行回测）"
+    )
+    parser.add_argument(
+        "--no-parallel",
+        action="store_true",
+        help="禁用并行优化（默认启用）"
+    )
+    parser.add_argument(
+        "--n-workers",
+        type=int,
+        default=-1,
+        help="并行工作进程数（默认: -1 表示自动检测CPU核心数）"
+    )
+
+    # 批量并行优化参数
+    parser.add_argument(
+        "--batch-parallel",
+        action="store_true",
+        help="启用批量并行优化（利用阶段批量采样+并行回测，默认启用）"
+    )
+    parser.add_argument(
+        "--no-batch-parallel",
+        action="store_true",
+        help="禁用批量并行优化（回到传统串行模式）"
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=8,
+        help="批量大小（默认: 8）"
+    )
+    parser.add_argument(
+        "--no-adaptive-batch",
+        action="store_true",
+        help="禁用自适应批量大小"
+    )
+    parser.add_argument(
+        "--no-hybrid-mode",
+        action="store_true",
+        help="禁用混合模式（不使用串行精细搜索）"
+    )
+    parser.add_argument(
+        "--parallel-ratio",
+        type=float,
+        default=0.7,
+        help="批量并行阶段占比（默认: 0.7，剩余用串行精细搜索）"
+    )
     
     # LLM参数
     parser.add_argument(
@@ -547,6 +599,43 @@ def main():
             print(f"回撤容忍阈值: {market_maker_config.max_drawdown_threshold}")
             print(f"最低交易次数: {market_maker_config.min_trades}")
             print(f"{'='*60}")
+
+    # 构建并行优化配置
+    # 默认启用并行，除非明确指定 --no-parallel
+    enable_parallel = not args.no_parallel
+    parallel_config = ParallelConfig(
+        enable_parallel=enable_parallel,
+        n_workers=args.n_workers
+    )
+
+    # 构建批量并行优化配置
+    # 默认启用批量并行，除非明确指定 --no-batch-parallel
+    enable_batch_parallel = not args.no_batch_parallel
+    batch_parallel_config = BatchParallelConfig(
+        enable_batch_parallel=enable_batch_parallel,
+        batch_size=args.batch_size,
+        adaptive_batch=not args.no_adaptive_batch,
+        hybrid_mode=not args.no_hybrid_mode,
+        parallel_ratio=args.parallel_ratio
+    )
+
+    if not args.quiet:
+        if enable_parallel:
+            import multiprocessing
+            n_workers = args.n_workers if args.n_workers != -1 else multiprocessing.cpu_count()
+            print(f"\n[并行] 已启用并行优化 ({n_workers} 进程)")
+        else:
+            print(f"\n[并行] 已禁用并行优化")
+
+        if enable_batch_parallel:
+            mode_desc = "混合模式" if batch_parallel_config.hybrid_mode else "全并行模式"
+            print(f"[批量并行] 已启用批量并行优化 - {mode_desc}")
+            print(f"           批量大小: {batch_parallel_config.batch_size}")
+            print(f"           自适应批量: {'是' if batch_parallel_config.adaptive_batch else '否'}")
+            if batch_parallel_config.hybrid_mode:
+                print(f"           并行比例: {batch_parallel_config.parallel_ratio:.0%}")
+        else:
+            print(f"[批量并行] 已禁用批量并行优化（传统串行模式）")
 
     # 展开通配符并收集所有数据文件
     data_files = []
@@ -715,7 +804,9 @@ def main():
                     data_names=data_names,
                     data_frequency=args.data_freq,
                     broker_config=broker_config,
-                    market_maker_config=market_maker_config
+                    market_maker_config=market_maker_config,
+                    parallel_config=parallel_config,
+                    batch_parallel_config=batch_parallel_config
                 )
                 
                 # 执行优化
@@ -796,7 +887,9 @@ def main():
                         custom_space=custom_space,
                         data_frequency=args.data_freq,
                         broker_config=broker_config,
-                        market_maker_config=market_maker_config
+                        market_maker_config=market_maker_config,
+                        parallel_config=parallel_config,
+                        batch_parallel_config=batch_parallel_config
                     )
                     
                     # 执行优化（v2.0 新增参数）

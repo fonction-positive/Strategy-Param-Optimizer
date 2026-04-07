@@ -149,6 +149,30 @@ class ParamSpaceOptimizer:
             priority="high",
             description="止盈参数：初始范围±30%"
         ),
+
+        # 分位数参数（quantile）- 必须严格在 (0, 1) 范围内
+        "quantile": ParameterSpaceRule(
+            param_pattern=r".*quantile.*|.*q_pressure.*|.*q_support.*|.*q_.*",
+            min_multiplier=0.9,  # 更保守的范围
+            max_multiplier=1.1,
+            min_absolute=0.05,   # 更严格的最小值
+            max_absolute=0.95,   # 更严格的最大值
+            distribution="uniform",
+            priority="high",
+            description="分位数参数：必须在 (0.05, 0.95) 范围内"
+        ),
+
+        # 概率参数（prob, probability）- 必须在 [0, 1] 范围内
+        "probability": ParameterSpaceRule(
+            param_pattern=r".*prob.*",
+            min_multiplier=0.8,
+            max_multiplier=1.2,
+            min_absolute=0.0,
+            max_absolute=1.0,
+            distribution="uniform",
+            priority="high",
+            description="概率参数：必须在 [0, 1] 范围内"
+        ),
     }
     
     def __init__(

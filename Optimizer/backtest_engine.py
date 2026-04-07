@@ -635,7 +635,11 @@ class BacktestEngine:
                 'mult': broker_config.mult,
                 'margin': broker_config.margin,
             }
-        
+
+        # 保存路径信息（用于进程池并行）
+        self.strategy_path = None
+        self.data_path = None
+
         # 设置数据频率
         if data_frequency:
             self.config.data_frequency = data_frequency
