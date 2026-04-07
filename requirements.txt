@@ -18,5 +18,8 @@ matplotlib>=3.5.0
 # 数据处理
 scipy>=1.9.0
 
+# 机器学习（策略中 QuantileRegressor 依赖）
+scikit-learn>=1.2.0
+
 # 可选：进度条
 tqdm>=4.64.0
