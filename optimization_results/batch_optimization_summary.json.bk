@@ -1,0 +1,40 @@
+{
+  "optimization_time": "2026-04-07 23:39:24",
+  "strategy": "strategy/KL0.12.py",
+  "objective": "sharpe_ratio",
+  "trials": 50,
+  "total_assets": 1,
+  "success_count": 1,
+  "fail_count": 0,
+  "results": [
+    {
+      "asset": "US_IWF_1D_20120103_20251224",
+      "status": "success",
+      "best_parameters": {
+        "atr_len": 30,
+        "cash_percent": 0.6197061653724507,
+        "cond": 3,
+        "contract_multi": 1190,
+        "lookback": 42,
+        "margin_ratio": 0.10275829257231642,
+        "q_pressure": 0.8369456100991933,
+        "q_support": 0.3104724525507352,
+        "reject_n": 3,
+        "shrink_ratio": 0.4546537812819466,
+        "stop_k": 1.6582438186872182,
+        "wick_ratio": 0.760460864464746,
+        "window": 3,
+        "zone_k": 0.7140140170044118
+      },
+      "performance_metrics": {
+        "sharpe_ratio": 0.7691,
+        "annual_return": 12.65,
+        "max_drawdown": 43.44,
+        "total_return": 426.27,
+        "final_value": 526270.97,
+        "trades_count": 26,
+        "win_rate": 69.23
+      }
+    }
+  ]
+}

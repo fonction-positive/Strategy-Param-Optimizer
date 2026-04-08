@@ -1,0 +1,43 @@
+{
+  "timestamp": "2026-04-08 13:11:50",
+  "time_metrics": {
+    "total_time_seconds": 165.64875984191895,
+    "estimated_serial_time_seconds": 1245.153128306071,
+    "avg_backtest_time_seconds": 15.564414103825888,
+    "n_trials": 80,
+    "exploration_trials": 0,
+    "exploitation_trials": 80
+  },
+  "resource_metrics": {
+    "avg_cpu_usage_percent": 619.9006451612904,
+    "max_cpu_usage_percent": 1176.0,
+    "initial_memory_mb": 227.109375,
+    "avg_memory_mb": 1707.2316028225807,
+    "peak_memory_mb": 2003.875
+  },
+  "parallel_metrics": {
+    "n_workers": 12,
+    "theoretical_speedup": 12,
+    "actual_speedup": 7.516827348990351,
+    "parallel_efficiency": 0.6264022790825293
+  },
+  "optimization_result": {
+    "best_value": 0.2283,
+    "best_params": {
+      "atr_len": 21,
+      "cash_percent": 0.6754184382343145,
+      "cond": 3,
+      "contract_multi": 895,
+      "lookback": 23,
+      "margin_ratio": 0.08626677987761455,
+      "q_pressure": 0.8468697776738233,
+      "q_support": 0.2943249278595217,
+      "reject_n": 4,
+      "shrink_ratio": 0.3508993994334034,
+      "stop_k": 1.058547875094632,
+      "wick_ratio": 0.4377059041678894,
+      "window": 1,
+      "zone_k": 0.8175972404652743
+    }
+  }
+}
