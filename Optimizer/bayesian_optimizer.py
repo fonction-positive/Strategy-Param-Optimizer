@@ -261,7 +261,11 @@ class BayesianOptimizer:
 
     def _diverse_batch_sampling(self, study, search_space: Dict[str, SearchSpaceConfig], batch_size: int) -> List[Dict[str, Any]]:
         """
-        多样化批量采样策略
+        批量采样策略
+
+        多样性完全由 TPESampler(constant_liar=True) 保证：
+        每次 ask() 后，sampler 用"谎言值"占住已采样区域，
+        后续 ask() 自然被推向不同区域，无需手动扰动。
 
         Args:
             study: Optuna study对象
@@ -272,100 +276,11 @@ class BayesianOptimizer:
             参数列表
         """
         params_batch = []
-        diversity_count = int(batch_size * self.batch_parallel_config.diversity_ratio)
-
-        # 主要部分: TPE 采样
-        for _ in range(batch_size - diversity_count):
+        for _ in range(batch_size):
             trial = study.ask()
             params = self._suggest_params(trial, search_space)
             params_batch.append({'trial': trial, 'params': params})
-
-        # 多样性部分: 添加随机扰动
-        for _ in range(diversity_count):
-            trial = study.ask()
-            params = self._suggest_params(trial, search_space)
-
-            # 添加随机扰动
-            perturbed_params = self._add_perturbation(params, search_space)
-            params_batch.append({'trial': trial, 'params': perturbed_params, 'is_perturbed': True})
-
         return params_batch
-
-    def _add_perturbation(self, params: Dict[str, Any], search_space: Dict[str, SearchSpaceConfig]) -> Dict[str, Any]:
-        """
-        为参数添加随机扰动
-
-        Args:
-            params: 原始参数
-            search_space: 搜索空间
-
-        Returns:
-            扰动后的参数
-        """
-        import numpy as np
-
-        perturbed_params = params.copy()
-        strength = self.batch_parallel_config.perturbation_strength
-
-        for name, value in params.items():
-            if name in search_space:
-                space_config = search_space[name]
-                param_range = space_config.max_value - space_config.min_value
-
-                if space_config.param_type == "int":
-                    # 整数参数：随机扰动±范围的strength倍
-                    perturbation = np.random.randint(-max(1, int(param_range * strength)),
-                                                     max(1, int(param_range * strength)) + 1)
-                    new_value = max(space_config.min_value,
-                                   min(space_config.max_value, value + perturbation))
-                    perturbed_params[name] = int(new_value)
-                else:
-                    # 浮点参数
-                    perturbation = np.random.uniform(-param_range * strength, param_range * strength)
-                    new_value = max(space_config.min_value,
-                                   min(space_config.max_value, value + perturbation))
-                    perturbed_params[name] = new_value
-
-        return perturbed_params
-
-    def _build_distributions(self, search_space: Dict[str, SearchSpaceConfig]) -> Dict[str, optuna.distributions.BaseDistribution]:
-        """
-        根据搜索空间构建 Optuna distributions 字典，用于 create_trial。
-
-        Args:
-            search_space: 搜索空间配置
-
-        Returns:
-            参数名 -> Optuna Distribution 的映射
-        """
-        distributions = {}
-        for name, config in search_space.items():
-            if config.param_type == "int":
-                step = int(config.step) if config.step else 1
-                distributions[name] = optuna.distributions.IntDistribution(
-                    low=int(config.min_value),
-                    high=int(config.max_value),
-                    step=step,
-                )
-            elif config.param_type == "float":
-                if config.distribution == "log_uniform":
-                    distributions[name] = optuna.distributions.FloatDistribution(
-                        low=config.min_value,
-                        high=config.max_value,
-                        log=True,
-                    )
-                else:
-                    step = config.step if config.step else None
-                    distributions[name] = optuna.distributions.FloatDistribution(
-                        low=config.min_value,
-                        high=config.max_value,
-                        step=step,
-                    )
-            elif config.param_type == "bool":
-                distributions[name] = optuna.distributions.CategoricalDistribution(
-                    choices=[True, False]
-                )
-        return distributions
 
     def _batch_parallel_exploitation(
         self,
@@ -441,36 +356,18 @@ class BayesianOptimizer:
                     batch_data, strategy_class, data, objective, verbose
                 )
 
-                # 3. 批量更新
+                # 3. 批量更新（所有 trial 都走正规 ask/tell，无需特殊处理）
                 for i, result in enumerate(batch_results):
                     trial_data = batch_data[i]
                     trial = trial_data['trial']
                     params = trial_data['params']
-                    is_perturbed = trial_data.get('is_perturbed', False)
 
                     value = result['value']
                     result_dict = result.get('result_dict')
                     error = result.get('error')
 
-                    # 告诉study结果
                     if error:
                         study.tell(trial, state=optuna.trial.TrialState.FAIL)
-                    elif is_perturbed:
-                        # 扰动 trial: trial 内部记录的是原始采样参数，
-                        # 但实际回测用的是扰动后的 params。
-                        # 如果直接 study.tell(trial, value)，TPE 会把 value
-                        # 和原始参数关联，导致学到错误映射。
-                        # 正确做法：丢弃占位 trial，用 add_trial 注入真实参数。
-                        study.tell(trial, state=optuna.trial.TrialState.FAIL)
-                        distributions = self._build_distributions(search_space)
-                        study.add_trial(
-                            optuna.trial.create_trial(
-                                params=params,
-                                distributions=distributions,
-                                values=[value],
-                                state=optuna.trial.TrialState.COMPLETE,
-                            )
-                        )
                     else:
                         study.tell(trial, value)
 

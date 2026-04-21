@@ -263,10 +263,8 @@ class BatchParallelConfig:
     adaptive_batch: bool = True            # 是否使用自适应批量大小
     max_batch_size: int = 12               # 最大批量大小
     min_batch_size: int = 2                # 最小批量大小
-    diversity_ratio: float = 0.3           # 多样性采样比例
     hybrid_mode: bool = True               # 是否使用混合模式
     parallel_ratio: float = 0.7            # 批量并行阶段占比（剩余用串行精细搜索）
-    perturbation_strength: float = 0.1     # 随机扰动强度
 
 
 # ==================== 默认配置实例 ====================
