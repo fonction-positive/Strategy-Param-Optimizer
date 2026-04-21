@@ -106,13 +106,19 @@ class NormalDistributionSampler:
             if default_value is not None:
                 default_value = max(0.05, min(0.95, default_value))
 
-        # 特殊处理：lookback 和 window 参数
+        # 特殊处理：lookback 和 window 参数（仅在调整后范围仍合法时才应用）
         if 'lookback' in param_name_lower:
-            min_value = max(20, min_value)
-            max_value = min(200, max_value)
+            adj_min = max(20, min_value)
+            adj_max = min(200, max_value)
+            if adj_min <= adj_max:
+                min_value = adj_min
+                max_value = adj_max
         elif 'window' in param_name_lower:
-            min_value = max(2, min_value)
-            max_value = min(20, max_value)
+            adj_min = max(2, min_value)
+            adj_max = min(20, max_value)
+            if adj_min <= adj_max:
+                min_value = adj_min
+                max_value = adj_max
 
         # 计算正态分布参数
         param_range = max_value - min_value

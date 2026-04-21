@@ -164,14 +164,19 @@ class BayesianOptimizer:
         # 设置Optuna日志级别
         optuna.logging.set_verbosity(optuna.logging.WARNING)
     
-    def _create_sampler(self) -> optuna.samplers.BaseSampler:
-        """创建采样器"""
+    def _create_sampler(self, constant_liar: bool = False) -> optuna.samplers.BaseSampler:
+        """创建采样器
+
+        Args:
+            constant_liar: 是否启用 constant_liar 模式（批量并行时应开启，
+                          使 batch 内连续 ask() 不会从同一 posterior 抽样）
+        """
         if self.config.sampler == "tpe":
-            return TPESampler(seed=self.config.seed)
+            return TPESampler(seed=self.config.seed, constant_liar=constant_liar)
         elif self.config.sampler == "random":
             return RandomSampler(seed=self.config.seed)
         else:
-            return TPESampler(seed=self.config.seed)
+            return TPESampler(seed=self.config.seed, constant_liar=constant_liar)
     
     def _create_pruner(self) -> optuna.pruners.BasePruner:
         """创建剪枝器"""
@@ -282,7 +287,7 @@ class BayesianOptimizer:
 
             # 添加随机扰动
             perturbed_params = self._add_perturbation(params, search_space)
-            params_batch.append({'trial': trial, 'params': perturbed_params})
+            params_batch.append({'trial': trial, 'params': perturbed_params, 'is_perturbed': True})
 
         return params_batch
 
@@ -322,6 +327,45 @@ class BayesianOptimizer:
                     perturbed_params[name] = new_value
 
         return perturbed_params
+
+    def _build_distributions(self, search_space: Dict[str, SearchSpaceConfig]) -> Dict[str, optuna.distributions.BaseDistribution]:
+        """
+        根据搜索空间构建 Optuna distributions 字典，用于 create_trial。
+
+        Args:
+            search_space: 搜索空间配置
+
+        Returns:
+            参数名 -> Optuna Distribution 的映射
+        """
+        distributions = {}
+        for name, config in search_space.items():
+            if config.param_type == "int":
+                step = int(config.step) if config.step else 1
+                distributions[name] = optuna.distributions.IntDistribution(
+                    low=int(config.min_value),
+                    high=int(config.max_value),
+                    step=step,
+                )
+            elif config.param_type == "float":
+                if config.distribution == "log_uniform":
+                    distributions[name] = optuna.distributions.FloatDistribution(
+                        low=config.min_value,
+                        high=config.max_value,
+                        log=True,
+                    )
+                else:
+                    step = config.step if config.step else None
+                    distributions[name] = optuna.distributions.FloatDistribution(
+                        low=config.min_value,
+                        high=config.max_value,
+                        step=step,
+                    )
+            elif config.param_type == "bool":
+                distributions[name] = optuna.distributions.CategoricalDistribution(
+                    choices=[True, False]
+                )
+        return distributions
 
     def _batch_parallel_exploitation(
         self,
@@ -402,6 +446,7 @@ class BayesianOptimizer:
                     trial_data = batch_data[i]
                     trial = trial_data['trial']
                     params = trial_data['params']
+                    is_perturbed = trial_data.get('is_perturbed', False)
 
                     value = result['value']
                     result_dict = result.get('result_dict')
@@ -409,7 +454,23 @@ class BayesianOptimizer:
 
                     # 告诉study结果
                     if error:
-                        study.tell(trial, float('-inf'))
+                        study.tell(trial, state=optuna.trial.TrialState.FAIL)
+                    elif is_perturbed:
+                        # 扰动 trial: trial 内部记录的是原始采样参数，
+                        # 但实际回测用的是扰动后的 params。
+                        # 如果直接 study.tell(trial, value)，TPE 会把 value
+                        # 和原始参数关联，导致学到错误映射。
+                        # 正确做法：丢弃占位 trial，用 add_trial 注入真实参数。
+                        study.tell(trial, state=optuna.trial.TrialState.FAIL)
+                        distributions = self._build_distributions(search_space)
+                        study.add_trial(
+                            optuna.trial.create_trial(
+                                params=params,
+                                distributions=distributions,
+                                values=[value],
+                                state=optuna.trial.TrialState.COMPLETE,
+                            )
+                        )
                     else:
                         study.tell(trial, value)
 
@@ -1311,9 +1372,11 @@ class BayesianOptimizer:
         # 创建Study
         direction = "maximize"  # 回撤已在evaluate_objective中取负
         
+        # 批量并行模式下开启 constant_liar，使 batch 内连续 ask() 采样更分散
+        use_constant_liar = self.batch_parallel_config.enable_batch_parallel and JOBLIB_AVAILABLE
         study = optuna.create_study(
             direction=direction,
-            sampler=self._create_sampler(),
+            sampler=self._create_sampler(constant_liar=use_constant_liar),
             pruner=self._create_pruner()
         )
         
